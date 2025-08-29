@@ -16,8 +16,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with: { workspaces: server/core-rust }
       - name: Versions
-        run: |
-          rustc -V && cargo -V
+        run: rustc -V && cargo -V
       - name: Fmt
         run: cargo fmt --all -- --check
       - name: Clippy
@@ -40,9 +39,10 @@ jobs:
           done
           echo "::endgroup::"
           if [ "${READY:-0}" != "1" ]; then
-            echo "auto-detecting bin via cargo metadata…"
+            echo "auto-detect bin via cargo metadata…"
             sudo apt-get update -y && sudo apt-get install -y jq >/dev/null
-            BIN=$(cargo metadata --format-version=1 | jq -r '.packages[]|select(.manifest_path|test("Cargo.toml$"))|.targets[]|select(.kind[]=="bin")|.name' | head -n1)
+            BIN=$(cargo metadata --format-version=1 | jq -r \
+              '.packages[]|select(.manifest_path|test("Cargo.toml$"))|.targets[]|select(.kind[]=="bin")|.name' | head -n1)
             echo "BIN=${BIN:-<none>}"
             pkill -f target/release || true
             if [ -n "$BIN" ]; then

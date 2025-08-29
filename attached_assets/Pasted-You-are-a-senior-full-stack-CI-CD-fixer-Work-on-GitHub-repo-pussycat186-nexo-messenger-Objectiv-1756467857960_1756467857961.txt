@@ -1,0 +1,259 @@
+You are a senior full-stack & CI/CD fixer. Work on GitHub repo: pussycat186/nexo-messenger.
+Objective: make CI green for Edge (TypeScript/Vite) and Rust core with a SAFE flow.
+ABSOLUTE RULES:
+- Never commit to main. Use a new branch: fix/ci-autofix
+- Make minimal, idempotent changes. Do not change app logic.
+- Add rich logging so failures are diagnosable.
+- When uncertain (e.g., preview dir name, Rust bin), autodetect safely.
+
+=== 0) Preflight & Branch ===
+1) Print repo tree for:
+   - .github/workflows/*
+   - package.json (+ lockfile)
+   - edge/, web/, apps/ (if present)
+   - server/core-rust/ (Cargo.toml, src/*)
+2) Create and switch to branch: fix/ci-autofix
+   - If branch exists, pull latest and continue.
+
+=== 1) Edge (TypeScript / Vite) CI (NO external deps; NO package.json edits required) ===
+Goal: Build frontend, serve the built files on :5000 with a tiny inline Node server that also exposes GET /health, then run smoke.
+Rationale: Avoid depending on "express" or new scripts; everything done inside workflow.
+
+A) Overwrite .github/workflows/ci-edge.yml with EXACT content:
+
+-----8<----- .github/workflows/ci-edge.yml
+name: CI Edge (TypeScript)
+
+on:
+  push:
+    branches: [ main, fix/**, feature/** ]
+  pull_request:
+
+concurrency:
+  group: ci-edge-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-edge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Print NPM scripts
+        run: node -e "console.log(require('./package.json').scripts)"
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Show build output (sanity)
+        run: |
+          echo "::group::build-artifacts"
+          (ls -la) || true
+          (find . -maxdepth 2 -type d -name dist -print -exec find {} -maxdepth 1 -type f \; | head -n 200) || true
+          (find . -maxdepth 2 -type d -name build -print -exec find {} -maxdepth 1 -type f \; | head -n 200) || true
+          echo "::endgroup::"
+
+      # Inline preview server that serves ./dist (fallback to ./build) and /health
+      - name: Start preview server (inline, port 5000)
+        run: |
+          node - <<'NODE' &
+          const http = require('http'), fs = require('fs'), path = require('path'), url = require('url');
+          const port = 5000;
+          const candidates = [path.join(process.cwd(),'dist'), path.join(process.cwd(),'build')];
+          let root = candidates.find(p => { try { return fs.statSync(p).isDirectory(); } catch { return false; } });
+          if (!root) root = process.cwd(); // last resort to let the job show a 404 quickly
+          console.log('[inline-preview] root =', root, 'port =', port);
+          const server = http.createServer((req,res)=>{
+            if (req.url === '/health') { res.writeHead(200,{'Content-Type':'application/json'}); return res.end('{"status":"ok"}'); }
+            const parsed = url.parse(req.url).pathname || '/';
+            let file = path.join(root, parsed === '/' ? 'index.html' : parsed);
+            fs.readFile(file, (e, data)=>{
+              if (e) { res.writeHead(404); return res.end('not found'); }
+              res.writeHead(200); res.end(data);
+            });
+          });
+          server.listen(port, ()=>console.log('[inline-preview] listening http://localhost:'+port));
+          NODE
+
+      - name: Wait for /health
+        run: |
+          for i in {1..60}; do
+            if curl -fsS http://localhost:5000/health > /dev/null; then
+              echo "Preview ready"; exit 0
+            fi
+            echo "waiting ($i/60)"; sleep 2
+          done
+          echo "Preview not ready"; exit 1
+
+      - name: Smoke tests
+        env:
+          SMOKE_URL: http://localhost:5000
+        run: |
+          if npm run | grep -q "test:smoke"; then
+            npm run test:smoke
+          else
+            echo "No test:smoke script; basic check:"
+            curl -f $SMOKE_URL/ && echo "Basic smoke OK"
+          fi
+
+      - name: Upload logs/artifacts (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-smoke-logs
+          path: |
+            **/npm-debug.log
+            dist/**
+            build/**
+          if-no-files-found: ignore
+-----8<-----
+
+B) Do NOT add express or edit package.json unless absolutely necessary. The inline server is enough.
+
+=== 2) Rust Core CI (auto-detect bin, robust /health wait) ===
+Goal: Modern toolchain, fmt+clippy+tests, then run the server and wait for GET /health on PORT=8000. If binary name is unknown, discover it via cargo metadata.
+
+A) Overwrite .github/workflows/ci-rust.yml with EXACT content:
+
+-----8<----- .github/workflows/ci-rust.yml
+name: CI Rust Core
+
+on:
+  push:
+    branches: [ main, fix/**, feature/** ]
+  pull_request:
+
+concurrency:
+  group: ci-rust-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server/core-rust
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            server/core-rust
+
+      - name: Versions
+        run: |
+          rustc -V
+          cargo -V
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Tests (nocapture)
+        env:
+          RUST_BACKTRACE: 1
+        run: cargo test --verbose -- --nocapture
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Run server & wait for /health
+        env:
+          RUST_LOG: info
+          RUST_BACKTRACE: 1
+          PORT: 8000
+        run: |
+          set -e
+          echo "::group::Try cargo run --release"
+          (cargo run --release &) || true
+          PID=$!
+          sleep 1
+          ps -p $PID || true
+          echo "::endgroup::"
+
+          HAS_HEALTH=0
+          for i in {1..20}; do
+            if curl -fsS http://localhost:8000/health > /dev/null; then
+              HAS_HEALTH=1; echo "Server ready via default bin"; break
+            fi
+            sleep 1
+          done
+
+          if [ "$HAS_HEALTH" = "0" ]; then
+            echo "Default run not responding; auto-detecting bin via cargo metadata…"
+            sudo apt-get update -y && sudo apt-get install -y jq >/dev/null
+            BIN=$(cargo metadata --format-version=1 | jq -r '
+              .packages[] | select(.manifest_path|test("server/core-rust/Cargo.toml$"))
+              | .targets[] | select(.kind[]=="bin") | .name' | head -n1)
+            echo "Detected bin: ${BIN:-<none>}"
+            if [ -n "$BIN" ]; then
+              pkill -f target/release || true
+              (cargo run --release --bin "$BIN" &) || true
+              PID=$!
+              for i in {1..30}; do
+                if curl -fsS http://localhost:8000/health > /dev/null; then
+                  HAS_HEALTH=1; echo "Server ready via bin=$BIN"; break
+                fi
+                echo "waiting server ($i/30)"; sleep 2
+              done
+            fi
+          fi
+
+          if [ "$HAS_HEALTH" != "1" ]; then
+            echo "::warning::/health not responding on :8000; list target/release for debugging"
+            ls -la target/release || true
+            exit 1
+          fi
+
+          curl -f http://localhost:8000/health
+          kill $PID || true
+-----8<-----
+
+B) IMPORTANT: Ensure the Rust server binds to 0.0.0.0:${PORT:-8000} and exposes GET /health 200 JSON.
+- If missing, add a minimal /health route consistent with the framework (axum/actix/etc.).
+- Do not change business logic; only add the health probe.
+
+=== 3) Local verification (inside Replit) ===
+Run:
+- npm ci && npm run build
+- Start the inline server locally to confirm (optional).
+- cd server/core-rust && cargo fmt --all && cargo clippy --all-targets --all-features -- -D warnings && cargo test --verbose
+- (cargo run --release &) ; poll http://localhost:8000/health ; kill process when done.
+
+If any step fails locally, fix minimally, re-run until green.
+
+=== 4) Commit & Push & PR ===
+1) Stage and commit:
+   git add .github/workflows/ci-edge.yml .github/workflows/ci-rust.yml
+   git commit -m "ci: inline Edge preview + robust Rust bin autodetect & /health wait"
+2) Push branch:
+   git push -u origin fix/ci-autofix
+3) Open PR to main titled:
+   "CI autofix: Edge preview + Rust toolchain & healthcheck (green Actions)"
+   PR body: explain changes, note no app logic changes, include brief local test notes.
+
+=== 5) Acceptance Criteria ===
+- CI Edge (TypeScript): passes build, preview, health wait, smoke (or basic curl).
+- CI Rust Core: passes fmt/clippy/tests, builds release, runs server, /health responds on :8000.
+- No changes to application logic; changes are CI-only (plus optional health endpoint).
+- Logs are sufficient to debug if anything fails.
+
+=== 6) If CI still fails, auto-diagnose and patch ===
+- Edge: If build output is not in dist/ or build/, detect and serve the actual folder by scanning for index.html under common folders and adjust the inline server path accordingly in ci-edge.yml.
+- Rust: If /health still fails, detect the bound port from server logs (if any) and adapt the curl target; otherwise, add a minimal /health route and ensure binding to PORT env is respected. Re-run checks.

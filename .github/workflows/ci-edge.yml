@@ -18,21 +18,56 @@ jobs:
         with:
           node-version: '20'
           cache: 'npm'
+
+      - name: Print NPM scripts
+        run: node -e "console.log(require('./package.json').scripts)"
+
       - name: Install deps
         run: npm ci
+
       - name: Build
         run: npm run build
-      - name: Start preview server
-        run: node scripts/mini-server.js &
+
+      - name: Show build output (sanity)
+        run: |
+          echo "::group::build-artifacts"
+          (ls -la) || true
+          (find . -maxdepth 2 -type d -name dist -print -exec find {} -maxdepth 1 -type f \; | head -n 200) || true
+          (find . -maxdepth 2 -type d -name build -print -exec find {} -maxdepth 1 -type f \; | head -n 200) || true
+          echo "::endgroup::"
+
+      # Inline preview server that serves ./dist (fallback to ./build) and /health
+      - name: Start preview server (inline, port 5000)
+        run: |
+          node - <<'NODE' &
+          const http = require('http'), fs = require('fs'), path = require('path'), url = require('url');
+          const port = 5000;
+          const candidates = [path.join(process.cwd(),'dist'), path.join(process.cwd(),'build')];
+          let root = candidates.find(p => { try { return fs.statSync(p).isDirectory(); } catch { return false; } });
+          if (!root) root = process.cwd(); // last resort to let the job show a 404 quickly
+          console.log('[inline-preview] root =', root, 'port =', port);
+          const server = http.createServer((req,res)=>{
+            if (req.url === '/health') { res.writeHead(200,{'Content-Type':'application/json'}); return res.end('{"status":"ok"}'); }
+            const parsed = url.parse(req.url).pathname || '/';
+            let file = path.join(root, parsed === '/' ? 'index.html' : parsed);
+            fs.readFile(file, (e, data)=>{
+              if (e) { res.writeHead(404); return res.end('not found'); }
+              res.writeHead(200); res.end(data);
+            });
+          });
+          server.listen(port, ()=>console.log('[inline-preview] listening http://localhost:'+port));
+          NODE
+
       - name: Wait for /health
         run: |
-          for i in {1..30}; do
+          for i in {1..60}; do
             if curl -fsS http://localhost:5000/health > /dev/null; then
               echo "Preview ready"; exit 0
             fi
-            echo "waiting ($i/30)"; sleep 2
+            echo "waiting ($i/60)"; sleep 2
           done
           echo "Preview not ready"; exit 1
+
       - name: Smoke tests
         env:
           SMOKE_URL: http://localhost:5000
@@ -40,15 +75,17 @@ jobs:
           if npm run | grep -q "test:smoke"; then
             npm run test:smoke
           else
-            echo "No test:smoke script found; basic check:"
-            curl -f $SMOKE_URL/
+            echo "No test:smoke script; basic check:"
+            curl -f $SMOKE_URL/ && echo "Basic smoke OK"
           fi
-      - name: Upload preview logs (always)
+
+      - name: Upload logs/artifacts (always)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: edge-smoke-logs
           path: |
             **/npm-debug.log
-            **/logs/**/*
+            dist/**
+            build/**
           if-no-files-found: ignore

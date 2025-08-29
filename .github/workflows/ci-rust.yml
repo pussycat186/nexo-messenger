@@ -17,35 +17,84 @@ jobs:
         working-directory: server/core-rust
     steps:
       - uses: actions/checkout@v4
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
           workspaces: |
             server/core-rust
+
+      - name: Versions
+        run: |
+          rustc -V
+          cargo -V
+
       - name: Check formatting
         run: cargo fmt --all -- --check
+
       - name: Clippy (deny warnings)
         run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: Tests
-        run: cargo test --verbose
+
+      - name: Tests (nocapture)
+        env:
+          RUST_BACKTRACE: 1
+        run: cargo test --verbose -- --nocapture
+
       - name: Build (release)
         run: cargo build --release
+
       - name: Run server & wait for /health
         env:
           RUST_LOG: info
+          RUST_BACKTRACE: 1
           PORT: 8000
         run: |
+          set -e
+          echo "::group::Try cargo run --release"
           (cargo run --release &) || true
           PID=$!
-          for i in {1..30}; do
+          sleep 1
+          ps -p $PID || true
+          echo "::endgroup::"
+
+          HAS_HEALTH=0
+          for i in {1..20}; do
             if curl -fsS http://localhost:8000/health > /dev/null; then
-              echo "Server ready"; break
+              HAS_HEALTH=1; echo "Server ready via default bin"; break
             fi
-            echo "waiting server ($i/30)"; sleep 2
+            sleep 1
           done
+
+          if [ "$HAS_HEALTH" = "0" ]; then
+            echo "Default run not responding; auto-detecting bin via cargo metadata…"
+            sudo apt-get update -y && sudo apt-get install -y jq >/dev/null
+            BIN=$(cargo metadata --format-version=1 | jq -r '
+              .packages[] | select(.manifest_path|test("server/core-rust/Cargo.toml$"))
+              | .targets[] | select(.kind[]=="bin") | .name' | head -n1)
+            echo "Detected bin: ${BIN:-<none>}"
+            if [ -n "$BIN" ]; then
+              pkill -f target/release || true
+              (cargo run --release --bin "$BIN" &) || true
+              PID=$!
+              for i in {1..30}; do
+                if curl -fsS http://localhost:8000/health > /dev/null; then
+                  HAS_HEALTH=1; echo "Server ready via bin=$BIN"; break
+                fi
+                echo "waiting server ($i/30)"; sleep 2
+              done
+            fi
+          fi
+
+          if [ "$HAS_HEALTH" != "1" ]; then
+            echo "::warning::/health not responding on :8000; list target/release for debugging"
+            ls -la target/release || true
+            exit 1
+          fi
+
           curl -f http://localhost:8000/health
           kill $PID || true

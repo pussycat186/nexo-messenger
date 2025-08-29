@@ -23,11 +23,15 @@ pub async fn websocket_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, session_id, state))
 }
 
-async fn handle_socket(mut socket: axum::extract::ws::WebSocket, session_id: String, state: AppState) {
+async fn handle_socket(
+    mut socket: axum::extract::ws::WebSocket,
+    session_id: String,
+    state: AppState,
+) {
     info!("WebSocket connected: {}", session_id);
 
     let (tx, mut rx) = mpsc::unbounded_channel();
-    
+
     // Store session
     {
         let mut sessions = state.ws_sessions.write().await;

@@ -29,7 +29,7 @@ pub struct STH {
     root: String,
     prev_hash: String,
     policy: Policy,
-    timestamp: i64,
+    pub pub timestamp: i64,
     signatures: Vec<Signature>,
 }
 
@@ -50,10 +50,20 @@ pub struct ChainQuery {
     limit: Option<usize>,
 }
 
-pub async fn health_handler(State(state): State<AppState>) -> Result<Json<HealthResponse>, StatusCode> {
-    let users_count = state.storage.get_user_count().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let sth_count = state.storage.get_sth_count().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    
+pub async fn health_handler(
+    State(state): State<AppState>,
+) -> Result<Json<HealthResponse>, StatusCode> {
+    let users_count = state
+        .storage
+        .get_user_count()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let sth_count = state
+        .storage
+        .get_sth_count()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     Ok(Json(HealthResponse {
         status: "healthy".to_string(),
         timestamp: chrono::Utc::now().timestamp(),
@@ -68,9 +78,10 @@ pub async fn register_handler(
 ) -> Result<Json<HashMap<String, String>>, StatusCode> {
     // Implementation would mirror the TypeScript version
     // This is a skeleton for CI compilation
-    Ok(Json(HashMap::from([
-        ("message".to_string(), "DID registered successfully".to_string())
-    ])))
+    Ok(Json(HashMap::from([(
+        "message".to_string(),
+        "DID registered successfully".to_string(),
+    )])))
 }
 
 pub async fn sth_latest_handler(State(state): State<AppState>) -> Result<Json<STH>, StatusCode> {

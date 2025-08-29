@@ -1,6 +1,10 @@
-use std::{fs::OpenOptions, io::{BufRead, BufReader, Write}, path::PathBuf};
-use serde::{Deserialize, Serialize};
 use crate::routes::STH;
+use serde::{Deserialize, Serialize};
+use std::{
+    fs::OpenOptions,
+    io::{BufRead, BufReader, Write},
+    path::PathBuf,
+};
 
 #[derive(Serialize, Deserialize)]
 pub struct UserRegistration {
@@ -19,7 +23,7 @@ impl FileStorage {
     pub fn new(data_dir: &str) -> anyhow::Result<Self> {
         let data_path = PathBuf::from(data_dir);
         std::fs::create_dir_all(&data_path)?;
-        
+
         Ok(FileStorage {
             users_file: data_path.join("users.jsonl"),
             sth_file: data_path.join("sth.jsonl"),
@@ -37,8 +41,9 @@ impl FileStorage {
                 let reader = BufReader::new(file);
                 Ok(reader.lines().count())
             }
-        }).await??;
-        
+        })
+        .await??;
+
         Ok(count)
     }
 
@@ -53,14 +58,15 @@ impl FileStorage {
                 let reader = BufReader::new(file);
                 Ok(reader.lines().count())
             }
-        }).await??;
-        
+        })
+        .await??;
+
         Ok(count)
     }
 
     pub async fn append_user_registration(&self, user: UserRegistration) -> anyhow::Result<()> {
         let json_line = serde_json::to_string(&user)? + "\n";
-        
+
         tokio::task::spawn_blocking({
             let file_path = self.users_file.clone();
             move || -> anyhow::Result<()> {
@@ -72,8 +78,9 @@ impl FileStorage {
                 file.sync_all()?;
                 Ok(())
             }
-        }).await??;
-        
+        })
+        .await??;
+
         Ok(())
     }
 
@@ -84,11 +91,11 @@ impl FileStorage {
                 if !file_path.exists() {
                     return Ok(None);
                 }
-                
+
                 let file = std::fs::File::open(file_path)?;
                 let reader = BufReader::new(file);
                 let lines: Vec<String> = reader.lines().collect::<Result<Vec<_>, _>>()?;
-                
+
                 if let Some(last_line) = lines.last() {
                     let sth: STH = serde_json::from_str(last_line)?;
                     Ok(Some(sth))
@@ -96,8 +103,9 @@ impl FileStorage {
                     Ok(None)
                 }
             }
-        }).await??;
-        
+        })
+        .await??;
+
         Ok(sth)
     }
 
@@ -108,23 +116,25 @@ impl FileStorage {
                 if !file_path.exists() {
                     return Ok(vec![]);
                 }
-                
+
                 let file = std::fs::File::open(file_path)?;
                 let reader = BufReader::new(file);
                 let lines: Vec<String> = reader.lines().collect::<Result<Vec<_>, _>>()?;
-                
-                let mut sth_list: Vec<STH> = lines.iter()
+
+                let mut sth_list: Vec<STH> = lines
+                    .iter()
                     .map(|line| serde_json::from_str(line))
                     .collect::<Result<Vec<_>, _>>()?;
-                
+
                 // Newest first
                 sth_list.reverse();
                 sth_list.truncate(limit);
-                
+
                 Ok(sth_list)
             }
-        }).await??;
-        
+        })
+        .await??;
+
         Ok(sth_list)
     }
 }

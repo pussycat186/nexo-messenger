@@ -1,0 +1,114 @@
+You are a senior DevOps + Release Engineer. 
+Repo: mono-repo "nexo-messenger" with these parts:
+- server/core-rust (Axum 0.7, Tokio 1, ed25519-dalek v2)
+- server (TypeScript Node, Vite dev helper)
+- client (Vite + React + TS)
+- scripts (ts-node utils: smoke.ts, audit_merkle.ts)
+- docs/*.md
+
+Goal: Design and implement PRODUCTION-GRADE CI/CD on GitHub Actions with fast caching, strict checks, and safe releases.
+
+### 0) General
+- Use GitHub Actions under `.github/workflows/`.
+- Use smallest runners (ubuntu-latest).
+- Strong caching:
+  - Rust: `actions/cache` keyed by Cargo.lock + rustc version.
+  - Node: `actions/setup-node` with built-in cache=pnpm or npm (prefer pnpm if lockfile exists; otherwise npm).
+- Always run on PR and on push to main. Only publish on tags `v*`.
+- Make all jobs **fail-fast** and required for PR merge.
+- Protect main via status checks (document steps to enable in repo settings).
+
+### 1) Workflow: test-rust.yml
+- Triggers: push, pull_request.
+- Matrix: toolchain = stable
+- Steps:
+  1) Checkout
+  2) Setup Rust (use rust-toolchain.toml if present; otherwise `stable`).
+  3) Cache Cargo based on `Cargo.lock` and `rustc -Vv`.
+  4) `cargo fmt --all -- --check`
+  5) `cargo clippy --all-targets --all-features -- -D warnings`
+  6) Build + Test:
+     - `cargo build --workspace --all-targets --locked`
+     - `cargo test --workspace --all-targets --locked --no-fail-fast`
+  7) Security:
+     - `cargo install cargo-audit` (cache cargo bin dir) then `cargo audit --ignore RUSTSEC-*-*` (add ignore list only if needed; create a commented section)
+
+### 2) Workflow: test-web.yml (Node: server + client + scripts)
+- Triggers: push, pull_request.
+- Strategy: Node 20.x
+- Steps:
+  1) Checkout
+  2) Setup Node (20) with cache
+  3) If `pnpm-lock.yaml` exists → `pnpm i -g pnpm` then `pnpm i`. Else use `npm ci`.
+  4) Lint:
+     - If repo has eslint config, run `pnpm lint` or `npm run lint` (fallback to skip with warning).
+     - Type-check: `pnpm -w tsc -b` or `npm run -ws typecheck` (fallback to `npx tsc --noEmit` if no scripts).
+  5) Build client and server (skip if no scripts present):
+     - `pnpm --filter client build` / `npm --workspace client run build`
+     - `pnpm --filter server build` / `npm --workspace server run build`
+  6) Unit tests (if present):
+     - `pnpm -r test -- --ci` OR `npm -ws test -- --ci` (continue-on-error=false)
+  7) Package artifacts (upload):
+     - Upload `client/dist` and any server build outputs as Actions artifacts for PR preview.
+
+### 3) Workflow: release.yml (semantic-release style or tag-publish)
+- Trigger:
+  - On tag push `v*` → do a release.
+- Jobs:
+  - Reuse test-rust and test-web via `workflow_call` OR re-run minimal checks.
+  - Create GitHub Release with notes (auto-changelog).
+  - Build production artifacts:
+    - Rust: `cargo build --release` in `server/core-rust` → upload binary as release asset (linux x86_64).
+    - Web: build `client` → upload `client-dist.zip` asset.
+  - OPTIONAL (commented block): Docker build + push (if later you add GHCR):
+    - `docker buildx build ... --push ghcr.io/<owner>/nexo:<tag>`
+- Make the job idempotent and safe (only on tags).
+
+### 4) Workflow: ci-all.yml (meta status, optional)
+- Trigger: pull_request
+- Purpose: aggregate required checks using `needs: [test-rust, test-web]` and just echo success.
+- Not strictly required if repo protection requires each individual workflow; include only if it helps.
+
+### 5) Repo Hygiene
+- Ensure `.editorconfig` exists (it does).
+- Add `.gitattributes` with `* text=auto eol=lf`.
+- Prettier + ESLint base config for client/server if missing:
+  - If not present, generate minimal `.eslintrc.cjs` and `.prettierrc`.
+- Add `package.json` scripts (in root and/or workspaces) if missing:
+  - `"lint"`, `"typecheck"`, `"build"`, `"test"`.
+- For TS scripts under /scripts, add `tsconfig.json` or use tsx runner in CI.
+
+### 6) Speed & Determinism
+- Use `--locked` everywhere for Rust and `ci` for npm/pnpm.
+- Cache node_modules keyed by lockfile hash.
+- Avoid network-heavy steps unless cache miss.
+
+### 7) Documentation
+- Update `docs/RUNBOOK.md` with:
+  - How CI works, required checks, how to release (create tag `vX.Y.Z`), where artifacts appear.
+  - How to enable “Branch protection rules” to require:
+    - test-rust
+    - test-web
+  - Add a “Local dev quick check” section:
+    - `cargo fmt && cargo clippy && cargo test`
+    - `pnpm i && pnpm -r build && pnpm -r test`
+
+### 8) Acceptance Criteria
+- Commit all new/updated workflow files.
+- Run the workflows on a dummy PR to prove they pass.
+- Produce a summary in a comment:
+  - Which files were added/changed
+  - How caching keys are computed
+  - Example release flow with a tag (no secrets needed)
+- Ensure all YAML passes `actionlint` (if available) or at least `--dry-run` validates.
+
+### 9) Names
+- Use filenames:
+  - `.github/workflows/test-rust.yml`
+  - `.github/workflows/test-web.yml`
+  - `.github/workflows/release.yml`
+  - (optional) `.github/workflows/ci-all.yml`
+
+### 10) After you finish
+- Post the final commit hash.
+- Paste short instructions the maintainer should follow to enable branch protection and (optional) GHCR later.

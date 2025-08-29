@@ -1,4 +1,4 @@
-use sha2::{Sha256, Digest};
+use sha2::{Digest, Sha256};
 
 pub fn compute_merkle_root(leaves: &[Vec<u8>]) -> Vec<u8> {
     if leaves.is_empty() {
@@ -6,10 +6,10 @@ pub fn compute_merkle_root(leaves: &[Vec<u8>]) -> Vec<u8> {
     }
 
     let mut level: Vec<Vec<u8>> = leaves.to_vec();
-    
+
     while level.len() > 1 {
         let mut next_level = Vec::new();
-        
+
         for chunk in level.chunks(2) {
             if chunk.len() == 2 {
                 // Pair exists, hash together
@@ -22,17 +22,17 @@ pub fn compute_merkle_root(leaves: &[Vec<u8>]) -> Vec<u8> {
                 next_level.push(chunk[0].clone());
             }
         }
-        
+
         level = next_level;
     }
-    
+
     level[0].clone()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
 
     #[test]
     fn test_empty_tree() {
@@ -52,14 +52,14 @@ mod tests {
     fn test_two_leaves() {
         let leaf1 = Sha256::digest(b"leaf1").to_vec();
         let leaf2 = Sha256::digest(b"leaf2").to_vec();
-        
+
         let expected = {
             let mut hasher = Sha256::new();
             hasher.update(&leaf1);
             hasher.update(&leaf2);
             hasher.finalize().to_vec()
         };
-        
+
         let root = compute_merkle_root(&[leaf1, leaf2]);
         assert_eq!(root, expected);
     }

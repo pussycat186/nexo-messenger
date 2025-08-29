@@ -11,16 +11,16 @@ use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
 
-mod routes;
-mod merkle;
 mod cosign;
+mod merkle;
+mod metrics;
+mod routes;
 mod storage;
 mod ws;
-mod metrics;
 
 use crate::{
-    routes::{health_handler, register_handler, sth_latest_handler, sth_chain_handler},
     metrics::metrics_handler,
+    routes::{health_handler, register_handler, sth_chain_handler, sth_latest_handler},
     storage::FileStorage,
     ws::websocket_handler,
 };
@@ -32,7 +32,9 @@ pub struct AppState {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main
+{
+    init_tracing();() -> anyhow::Result<()> {
     tracing_subscriber::init();
 
     let storage = Arc::new(FileStorage::new("server/_data")?);
@@ -57,7 +59,7 @@ async fn main() -> anyhow::Result<()> {
     let addr: SocketAddr = format!("0.0.0.0:{}", port).parse()?;
 
     info!("NEXO core-rust server starting on {}", addr);
-    
+
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
 

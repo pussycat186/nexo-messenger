@@ -1,0 +1,65 @@
+name: Test Rust
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server/core-rust
+
+    strategy:
+      matrix:
+        toolchain: [stable]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Rust
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        toolchain: ${{ matrix.toolchain }}
+        components: rustfmt, clippy
+
+    - name: Cache Cargo dependencies
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          server/core-rust/target/
+        key: ${{ runner.os }}-cargo-${{ matrix.toolchain }}-${{ hashFiles('server/core-rust/Cargo.lock') }}-${{ hashFiles('server/core-rust/rust-toolchain.toml') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-${{ matrix.toolchain }}-${{ hashFiles('server/core-rust/Cargo.lock') }}-
+          ${{ runner.os }}-cargo-${{ matrix.toolchain }}-
+
+    - name: Check formatting
+      run: cargo fmt --all -- --check
+
+    - name: Run clippy
+      run: cargo clippy --all-targets --all-features -- -D warnings
+
+    - name: Build project
+      run: cargo build --workspace --all-targets --locked
+
+    - name: Run tests
+      run: cargo test --workspace --all-targets --locked --no-fail-fast
+
+    - name: Install and run security audit
+      run: |
+        # Cache cargo install if not already cached
+        if ! command -v cargo-audit &> /dev/null; then
+          cargo install cargo-audit
+        fi
+        # Run audit (add --ignore flags here if needed for specific advisories)
+        cargo audit
+        # Example of ignoring specific advisories (uncomment if needed):
+        # cargo audit --ignore RUSTSEC-2020-0071 --ignore RUSTSEC-2023-0018

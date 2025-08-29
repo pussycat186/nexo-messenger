@@ -1,12 +1,28 @@
-use axum::{extract::State, response::Response, http::{StatusCode, header}};
 use crate::AppState;
+use axum::{
+    extract::State,
+    http::{header, StatusCode},
+    response::Response,
+};
 
 pub async fn metrics_handler(State(state): State<AppState>) -> Result<Response, StatusCode> {
-    let users_count = state.storage.get_user_count().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let sth_count = state.storage.get_sth_count().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let users_count = state
+        .storage
+        .get_user_count()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let sth_count = state
+        .storage
+        .get_sth_count()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let ws_sessions = state.ws_sessions.read().await.len();
 
-    let latest_sth = state.storage.get_latest_sth().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let latest_sth = state
+        .storage
+        .get_latest_sth()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let last_sth_timestamp = latest_sth.map(|sth| sth.timestamp).unwrap_or(0);
 
     let metrics = format!(

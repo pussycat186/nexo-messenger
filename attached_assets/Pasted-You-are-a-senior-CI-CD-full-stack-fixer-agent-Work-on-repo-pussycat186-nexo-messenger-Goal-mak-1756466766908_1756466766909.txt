@@ -1,0 +1,219 @@
+You are a senior CI/CD & full-stack fixer agent. Work on repo: pussycat186/nexo-messenger.
+Goal: make all GitHub Actions green without changing app logic. Use a safety-first flow:
+- Work on a new branch: fix/ci-autofix
+- Make minimal, idempotent changes
+- Run all checks locally
+- Push branch, open PR with a clear summary, do NOT push to main.
+
+=== 0) Repo scan & preflight
+1) Print tree of:
+   - .github/workflows/*
+   - package.json (and package-lock.json if present)
+   - edge/, web/, apps/ (if exist)
+   - server/core-rust/ (Cargo.toml, src/*)
+2) Detect:
+   - Is frontend built with Vite? (look for vite.config.* and scripts)
+   - Edge/preview port currently used by dev/preview scripts
+   - Does frontend expose /health? (likely NO)
+   - Rust core: how is the HTTP server implemented, does it expose /health, what port?
+3) Create branch fix/ci-autofix.
+
+=== 1) Edge (TypeScript) CI fix
+Context: The current CI tries to curl http://localhost:5000/health then run smoke tests. Typical Vite frontend won’t have /health by default.
+Target: Provide a stable preview (port 5000) and a simple /health, then run smoke tests against the preview.
+
+Actions:
+A) Add a tiny static server with a /health route only for CI preview:
+   - Create file: scripts/mini-server.js with EXACT contents:
+
+-----8<----- scripts/mini-server.js
+const path = require('path');
+const express = require('express');
+const app = express();
+const port = process.env.PORT || 5000;
+const distPath = path.join(__dirname, '..', 'dist');
+app.get('/health', (_req, res) => res.json({ status: 'ok' }));
+app.use(express.static(distPath));
+app.listen(port, () => console.log(`[mini-server] listening on ${port}, dist=${distPath}`));
+-----8<-----
+
+B) Update package.json:
+   - Ensure devDependencies include express if not already (use non-breaking latest ^4):
+     "express": "^4"
+   - Add script:
+     "preview:health": "node scripts/mini-server.js"
+   - Keep existing build scripts intact.
+
+C) Rewrite .github/workflows/ci-edge.yml to:
+   - Use actions/checkout@v4 and actions/setup-node@v4 with node-version: '20'
+   - Cache npm using setup-node’s cache: 'npm'
+   - Steps:
+     1) npm ci
+     2) npm run build
+     3) npm run preview:health &  (background)
+     4) Wait for http://localhost:5000/health with a loop (30 tries, 2s interval)
+     5) Export SMOKE_URL=http://localhost:5000
+     6) Run npm run test:smoke if it exists; if not, run a simple curl -f $SMOKE_URL and exit 0
+   - On failure, upload logs/artifacts.
+Use THIS EXACT YAML content, adapting the job name if needed:
+
+-----8<----- .github/workflows/ci-edge.yml
+name: CI Edge (TypeScript)
+
+on:
+  push:
+    branches: [ main, fix/**, feature/** ]
+  pull_request:
+
+concurrency:
+  group: ci-edge-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-edge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install deps
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Start preview server
+        run: npm run preview:health &
+      - name: Wait for /health
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://localhost:5000/health > /dev/null; then
+              echo "Preview ready"; exit 0
+            fi
+            echo "waiting ($i/30)"; sleep 2
+          done
+          echo "Preview not ready"; exit 1
+      - name: Smoke tests
+        env:
+          SMOKE_URL: http://localhost:5000
+        run: |
+          if npm run | grep -q "test:smoke"; then
+            npm run test:smoke
+          else
+            echo "No test:smoke script found; basic check:"
+            curl -f $SMOKE_URL/
+          fi
+      - name: Upload preview logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-smoke-logs
+          path: |
+            **/npm-debug.log
+            **/logs/**/*
+          if-no-files-found: ignore
+-----8<-----
+
+D) Run locally inside Replit (non-blocking background if supported):
+   - npm ci && npm run build
+   - node scripts/mini-server.js & ; wait for /health; curl it.
+
+=== 2) Rust Core CI fix
+Context: Previous CI used actions-rs/toolchain and had set-output deprecation noise, and likely called a hard-coded binary name. We want stable toolchain, fmt/clippy/test, then run the server and healthcheck on a known port (8000). If /health route is missing, add a minimal one consistent with the existing framework (axum/actix/tide). Keep code style.
+
+Actions:
+A) Update .github/workflows/ci-rust.yml to THIS EXACT content (adjust paths if server/core-rust is the crate root; if not, detect real path first):
+
+-----8<----- .github/workflows/ci-rust.yml
+name: CI Rust Core
+
+on:
+  push:
+    branches: [ main, fix/**, feature/** ]
+  pull_request:
+
+concurrency:
+  group: ci-rust-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: server/core-rust
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            server/core-rust
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo test --verbose
+      - name: Build (release)
+        run: cargo build --release
+      - name: Run server & wait for /health
+        env:
+          RUST_LOG: info
+          PORT: 8000
+        run: |
+          (cargo run --release &) || true
+          PID=$!
+          for i in {1..30}; do
+            if curl -fsS http://localhost:8000/health > /dev/null; then
+              echo "Server ready"; break
+            fi
+            echo "waiting server ($i/30)"; sleep 2
+          done
+          curl -f http://localhost:8000/health
+          kill $PID || true
+-----8<-----
+
+B) If the Rust server does not expose GET /health on PORT (8000), add it minimally in the existing framework:
+   - If axum: router.route("/health", get(|| async { Json({"status":"healthy"}) }))
+   - If actix: App::new().route("/health", web::get().to(|| async { HttpResponse::Ok().json({"status":"healthy"}) }))
+   - If another framework, implement an equivalent 200 JSON.
+   - Ensure server binds to 0.0.0.0:8000 when PORT is set. Respect existing env handling; default to 8000.
+
+C) Run locally:
+   - cd server/core-rust
+   - cargo fmt --all
+   - cargo clippy --all-targets --all-features -- -D warnings
+   - cargo test --verbose
+   - (cargo run --release &) ; wait for /health; curl it ; kill.
+
+=== 3) Commit & PR
+1) Create commits with messages:
+   - chore(ci-edge): stable preview server with /health + update workflow for smoke
+   - chore(ci-rust): switch to dtolnay toolchain, add robust healthcheck run step
+   - chore(edge): add scripts/mini-server.js and preview:health script
+
+2) Push branch fix/ci-autofix.
+3) Open a PR to main with title:
+   "CI autofix: stable Edge preview + Rust toolchain & healthcheck (green Actions)"
+   Description must include:
+   - What changed in ci-edge.yml and ci-rust.yml
+   - Proof of local runs (paste the curl /health outputs)
+   - Notes that app logic unchanged; only CI/preview infra code added.
+
+=== 4) Acceptance criteria
+- GitHub Actions “CI Edge (TypeScript)” turns green
+- GitHub Actions “CI Rust Core” turns green
+- No lint/format violations introduced
+- No hardcoded project-specific secrets required
+- Changes are idempotent (re-running branch does not drift)
+- PR ready for human review/merge
+
+=== 5) Nice-to-have (do if trivial)
+- Add concurrency cancel-in-progress to both workflows (already in templates above)
+- Ensure artifacts upload on failure (already in Edge)
+- Short log redaction if any secrets envs appear

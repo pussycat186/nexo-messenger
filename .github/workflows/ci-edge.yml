@@ -2,119 +2,53 @@ name: CI Edge (TypeScript)
 
 on:
   push:
-    branches: [ main, develop ]
-    paths:
-      - 'client/**'
-      - 'server/**' 
-      - 'shared/**'
-      - 'scripts/**'
-      - '*.json'
-      - '*.ts'
-      - '.github/workflows/ci-edge.yml'
+    branches: [ main, fix/**, feature/** ]
   pull_request:
-    branches: [ main ]
+
+concurrency:
+  group: ci-edge-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test-edge:
     runs-on: ubuntu-latest
-    
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Setup Node.js 20
-      uses: actions/setup-node@v4
-      with:
-        node-version: '20'
-        cache: 'npm'
-
-    - name: Install dependencies
-      run: npm ci
-
-    - name: Type check
-      run: npm run check
-
-    - name: Build application
-      run: npm run build
-
-    - name: Start server in background
-      run: |
-        npm run start &
-        echo $! > server.pid
-        
-        # Wait for server to be ready
-        for i in {1..30}; do
-          if curl -f http://localhost:5000/health >/dev/null 2>&1; then
-            echo "Server is ready"
-            break
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+      - name: Install deps
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Start preview server
+        run: node scripts/mini-server.js &
+      - name: Wait for /health
+        run: |
+          for i in {1..30}; do
+            if curl -fsS http://localhost:5000/health > /dev/null; then
+              echo "Preview ready"; exit 0
+            fi
+            echo "waiting ($i/30)"; sleep 2
+          done
+          echo "Preview not ready"; exit 1
+      - name: Smoke tests
+        env:
+          SMOKE_URL: http://localhost:5000
+        run: |
+          if npm run | grep -q "test:smoke"; then
+            npm run test:smoke
+          else
+            echo "No test:smoke script found; basic check:"
+            curl -f $SMOKE_URL/
           fi
-          echo "Waiting for server... ($i/30)"
-          sleep 2
-        done
-
-    - name: Run smoke tests
-      run: |
-        export SMOKE_URL="http://localhost:5000"
-        export SMOKE_TIMEOUT_SEC=60
-        npm run test:smoke || (echo "Smoke tests failed" && exit 1)
-      env:
-        NODE_ENV: production
-
-    - name: Stop server
-      run: |
-        if [ -f server.pid ]; then
-          kill $(cat server.pid) || true
-        fi
-
-    - name: Upload smoke test logs
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: edge-smoke-logs
-        path: |
-          *.log
-          server/_data/
-        retention-days: 7
-
-  docker-edge:
-    runs-on: ubuntu-latest
-    needs: test-edge
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Login to GitHub Container Registry
-      if: github.event_name != 'pull_request'
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./docker/Dockerfile.edge
-        platforms: linux/amd64,linux/arm64
-        push: ${{ github.event_name != 'pull_request' }}
-        tags: |
-          ghcr.io/${{ github.repository }}-edge:latest
-          ghcr.io/${{ github.repository }}-edge:${{ github.sha }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-    - name: Test Docker image
-      run: |
-        docker run -d --name nexo-test -p 8000:8000 ghcr.io/${{ github.repository }}-edge:${{ github.sha }}
-        sleep 10
-        
-        # Test health endpoint
-        curl -f http://localhost:8000/health || exit 1
-        
-        docker stop nexo-test
-        docker rm nexo-test
+      - name: Upload preview logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-smoke-logs
+          path: |
+            **/npm-debug.log
+            **/logs/**/*
+          if-no-files-found: ignore

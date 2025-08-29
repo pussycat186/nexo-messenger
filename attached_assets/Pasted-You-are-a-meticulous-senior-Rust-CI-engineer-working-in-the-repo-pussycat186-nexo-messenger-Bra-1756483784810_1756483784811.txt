@@ -1,0 +1,123 @@
+You are a meticulous senior Rust + CI engineer working in the repo `pussycat186/nexo-messenger`.
+Branch to use: `fix/ci-ultra`. Do NOT touch main.
+
+PRIMARY GOAL
+Make the Rust workspace under `server/core-rust` compile cleanly and pass clippy with `-D warnings`.
+Fix the API mismatch between `ed25519` and `ed25519-dalek` and remove all clippy warnings reported in the latest CI log.
+
+ACCEPTANCE CRITERIA
+- `cargo fmt --all` makes no diff.
+- `cargo clippy --all-targets --all-features -- -D warnings` completes with 0 errors/warnings.
+- `cargo test --verbose -- --nocapture` completes successfully (or, if there are no tests, exits without build errors).
+- Commit and push to `fix/ci-ultra` with a single, clear commit.
+- No business logic changes beyond what’s strictly required to compile and satisfy clippy.
+
+STRICT RULES
+- Keep changes minimal and idempotent.
+- Do not alter server behavior, routes, or I/O semantics.
+- Prefer trait imports over blanket imports; prefer explicit types to reduce API ambiguity.
+- If two viable fixes exist, pick the one with the **fewest edits** and **strongest type clarity**.
+- Add comments only where non-obvious.
+
+----------------------------------------------------------------
+PHASE 0 — SAFETY & CONTEXT
+----------------------------------------------------------------
+1) `git fetch origin` and `git checkout -B fix/ci-ultra`.
+2) Print `rustc -V`, `cargo -V`.
+3) Confirm files exist:
+   - `server/core-rust/Cargo.toml`
+   - `server/core-rust/src/main.rs`
+   - `server/core-rust/src/routes.rs`
+   - `server/core-rust/src/cosign.rs`
+   - `server/core-rust/src/ws.rs` (if present)
+
+----------------------------------------------------------------
+PHASE 1 — COSIGN: align with ed25519_dalek v2 and signature v2
+----------------------------------------------------------------
+Goal: remove the errors seen in CI:
+  - unresolved imports `ed25519::Signer` / `Verifier`
+  - `SigningKey::generate` not found
+  - `sign`/`verify` methods not in scope
+  - `Signature::from_bytes` misuse & mismatched types
+
+Edits in `server/core-rust/src/cosign.rs`:
+
+A) Imports — make them explicit and correct:
+   Replace any of:
+     `use ed25519::{Signature, Signer, Verifier};`
+   with:
+     ```rust
+     use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier};
+     use ed25519 as ed25519_types; // keep the signature type from the `ed25519` crate
+     use ed25519_types::Signature;
+     use rand::rngs::OsRng;
+     use rand::RngCore;
+     ```
+   Rationale: `Signer`/`Verifier` traits must be imported from `ed25519_dalek`.
+   The common `Signature` type stays from `ed25519` which is what the trait impls expect.
+
+B) Key generation — remove `.generate(&mut OsRng)` usage.
+   - If the code calls `SigningKey::generate(&mut OsRng)`, replace with a deterministic and test-safe approach:
+     ```rust
+     let mut sk_bytes = [0u8; 32];
+     OsRng.fill_bytes(&mut sk_bytes);
+     let signing = SigningKey::from_bytes(&sk_bytes);
+     // If you need a verifying key:
+     let verifying: VerifyingKey = (&signing).into();
+     ```
+   - Do not change external behavior; this is only to restore compilability in CI.
+
+C) Signing — ensure trait is in scope and the return type is `ed25519::Signature`:
+   Change any form like:
+     `let sig: Signature = c.signing.sign(sth_bytes);`
+   to (if trait import is missing):
+     ```rust
+     let sig: Signature = Signer::sign(&c.signing, sth_bytes);
+     ```
+   (or simply `c.signing.sign(sth_bytes)` once `use ed25519_dalek::Signer;` is present)
+
+D) Parsing/verifying signatures — fix `from_bytes` and type mismatches:
+   - Avoid `if let Ok(sig) = Signature::from_bytes(...)` because `from_bytes` returns `Signature` (not `Result`).
+   Replace any block resembling:
+     ```rust
+     if let Ok(sig) = Signature::from_bytes(
+         sig_bytes.as_slice().try_into().unwrap_or_else(|_| [0u8; 64]),
+     ) { ... }
+     ```
+     with:
+     ```rust
+     let sig_arr: [u8; 64] = sig_bytes
+         .as_slice()
+         .try_into()
+         .unwrap_or([0u8; 64]);
+     let sig: Signature = Signature::from_bytes(&sig_arr);
+     // Verifier trait comes from ed25519_dalek
+     if Verifier::verify(&c.verifying, message, &sig).is_ok() {
+         // existing success path
+     }
+     ```
+   Ensure the `Verifier` trait is imported from `ed25519_dalek`.
+
+E) After edits, re-run in this order:
+   - `cargo fmt --all`
+   - `cargo clippy --all-targets --all-features -- -D warnings`
+   If clippy still complains about ambiguous imports or types, prefer to:
+     - Keep **all** signature values using `ed25519::Signature` (from `ed25519_types`) and keep traits from `ed25519_dalek`.
+     - Do NOT introduce custom wrapper types.
+
+----------------------------------------------------------------
+PHASE 2 — CLEAN UNUSED IMPORTS / VARIABLES (clippy blockers)
+----------------------------------------------------------------
+Fix exactly what clippy reported:
+
+File `server/core-rust/src/main.rs`:
+- Remove unused imports and keep only what is used:
+  ```rust
+  // Keep
+  use axum::routing::{get, post};
+  use axum::Router;
+  use tracing::info;
+
+  // Remove: WebSocket, WebSocketUpgrade, Path, Query, State, StatusCode,
+  //         Response, IntoResponse, Json (if unused here), header, warn,
+  //         and the standalone line `use tracing_subscriber;`

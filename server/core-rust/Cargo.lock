@@ -49,7 +49,7 @@ dependencies = [
  "async-trait",
  "axum-core",
  "axum-macros",
- "base64 0.22.1",
+ "base64",
  "bytes",
  "futures-util",
  "http",
@@ -124,12 +124,6 @@ dependencies = [
  "rustc-demangle",
  "windows-targets",
 ]
-
-[[package]]
-name = "base64"
-version = "0.21.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9d297deb1925b89f2ccc13d7635fa0714f12c87adce1c75356b39ca9b7178567"
 
 [[package]]
 name = "base64"
@@ -529,7 +523,7 @@ version = "1.0.0"
 dependencies = [
  "anyhow",
  "axum",
- "base64 0.21.7",
+ "base64",
  "ed25519",
  "ed25519-dalek",
  "rand",

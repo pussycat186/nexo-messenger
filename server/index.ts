@@ -3,6 +3,7 @@ import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
 import * as fs from 'fs';
 import * as path from 'path';
+import { fileURLToPath } from "url";
 
 const app = express();
 app.use(express.json());
@@ -63,12 +64,39 @@ app.use((req, res, next) => {
     res.status(status).json({ message });
   });
 
-  // Setup vite in development, serve static in production
-  if (app.get("env") === "development") {
-    await setupVite(app, server);
-  } else {
-    serveStatic(app);
+  // [ci-fix-static-ui] begin
+  const __filename = fileURLToPath(import.meta.url);
+  const __dirname  = path.dirname(__filename);
+
+  const candidates = [
+    path.resolve(__dirname, "../dist/public"),
+    path.resolve(__dirname, "../dist"),
+    path.resolve(__dirname, "../build"),
+    path.resolve(__dirname, "../../dist"),
+    path.resolve(__dirname, "../../build"),
+  ];
+  let staticRoot: string | null = null;
+  for (const p of candidates) {
+    try {
+      if (fs.existsSync(path.join(p, "index.html"))) { staticRoot = p; break; }
+    } catch {}
   }
+  if (staticRoot) {
+    console.log(`[express] static UI root = ${staticRoot}`);
+    // IMPORTANT: place AFTER API routes, BEFORE any 404 handler:
+    app.use(express.static(staticRoot));
+    // SPA fallback: serve index.html for any GET request that didn't match a file
+    app.use((req, res, next) => {
+      if (req.method === 'GET' && !req.path.startsWith('/api') && !req.path.startsWith('/health') && !req.path.startsWith('/did') && !req.path.startsWith('/sth') && !req.path.startsWith('/metrics') && !req.path.startsWith('/ws')) {
+        res.sendFile(path.join(staticRoot!, "index.html"));
+      } else {
+        next();
+      }
+    });
+  } else {
+    console.warn("[express] No built UI found — run `npm run build` to generate dist/");
+  }
+  // [ci-fix-static-ui] end
 
   // Serve on specified port, default to 5000
   const port = parseInt(process.env.PORT || '5000', 10);

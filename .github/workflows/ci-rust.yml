@@ -1,110 +1,60 @@
 name: CI Rust Core
-
 on:
-  push:
-    branches: [ main, develop ]
-    paths:
-      - 'server/core-rust/**'
-      - '.github/workflows/ci-rust.yml'
+  push: { branches: [ main, fix/**, feature/** ] }
   pull_request:
-    branches: [ main ]
-
+concurrency: { group: ci-rust-${{ github.ref }}, cancel-in-progress: true }
 jobs:
   test-rust:
     runs-on: ubuntu-latest
-    
+    defaults: { run: { working-directory: server/core-rust } }
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Install Rust stable
-      uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
-        profile: minimal
-        override: true
-        components: rustfmt, clippy
-
-    - name: Cache cargo dependencies
-      uses: actions/cache@v3
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          server/core-rust/target
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-
-    - name: Check formatting
-      working-directory: server/core-rust
-      run: cargo fmt --all -- --check
-
-    - name: Run clippy
-      working-directory: server/core-rust
-      run: cargo clippy --all-targets --all-features -- -D warnings
-
-    - name: Run tests
-      working-directory: server/core-rust
-      run: cargo test --verbose
-
-    - name: Build release binary
-      working-directory: server/core-rust
-      run: cargo build --release
-
-    - name: Test binary execution
-      working-directory: server/core-rust
-      run: |
-        # Start server in background
-        ./target/release/nexo-core &
-        SERVER_PID=$!
-        
-        # Wait for server to be ready
-        sleep 5
-        
-        # Test health endpoint
-        curl -f http://localhost:8000/health || exit 1
-        
-        # Stop server
-        kill $SERVER_PID || true
-
-  docker-rust:
-    runs-on: ubuntu-latest
-    needs: test-rust
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Login to GitHub Container Registry
-      if: github.event_name != 'pull_request'
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Build and push Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        file: ./docker/Dockerfile.rust
-        platforms: linux/amd64,linux/arm64
-        push: ${{ github.event_name != 'pull_request' }}
-        tags: |
-          ghcr.io/${{ github.repository }}-rust:latest
-          ghcr.io/${{ github.repository }}-rust:${{ github.sha }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
-
-    - name: Test Docker image
-      run: |
-        docker run -d --name nexo-rust-test -p 8001:8000 ghcr.io/${{ github.repository }}-rust:${{ github.sha }}
-        sleep 10
-        
-        # Test health endpoint
-        curl -f http://localhost:8001/health || exit 1
-        
-        docker stop nexo-rust-test
-        docker rm nexo-rust-test
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with: { components: rustfmt, clippy }
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with: { workspaces: server/core-rust }
+      - name: Versions
+        run: rustc -V && cargo -V
+      - name: Fmt
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Tests
+        env: { RUST_BACKTRACE: 1 }
+        run: cargo test --verbose -- --nocapture
+      - name: Build (release)
+        run: cargo build --release
+      - name: Run server & wait /health
+        env: { RUST_LOG: info, RUST_BACKTRACE: 1, PORT: 8000 }
+        run: |
+          set -e
+          echo "::group::try cargo run --release"
+          (cargo run --release &) || true
+          PID=$!
+          for i in {1..30}; do
+            if curl -fsS http://localhost:8000/health > /dev/null; then echo "health ok"; READY=1; break; fi
+            echo "wait default bin ($i/30)"; sleep 2
+          done
+          echo "::endgroup::"
+          if [ "${READY:-0}" != "1" ]; then
+            echo "auto-detect bin via cargo metadata…"
+            sudo apt-get update -y && sudo apt-get install -y jq >/dev/null
+            BIN=$(cargo metadata --format-version=1 | jq -r \
+              '.packages[]|select(.manifest_path|test("Cargo.toml$"))|.targets[]|select(.kind[]=="bin")|.name' | head -n1)
+            echo "BIN=${BIN:-<none>}"
+            pkill -f target/release || true
+            if [ -n "$BIN" ]; then
+              (cargo run --release --bin "$BIN" &) || true
+              PID=$!
+              for i in {1..30}; do
+                if curl -fsS http://localhost:8000/health > /dev/null; then echo "health ok (bin=$BIN)"; READY=1; break; fi
+                echo "wait detected bin ($i/30)"; sleep 2
+              done
+            fi
+          fi
+          if [ "${READY:-0}" != "1" ]; then
+            echo "::warning::/health never responded"; ls -la target/release || true; exit 1
+          fi
+          curl -fsS http://localhost:8000/health && kill $PID || true

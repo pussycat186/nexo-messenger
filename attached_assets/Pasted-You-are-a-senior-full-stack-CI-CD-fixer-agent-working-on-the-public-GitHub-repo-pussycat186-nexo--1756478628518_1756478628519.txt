@@ -1,0 +1,334 @@
+You are a senior full-stack & CI/CD fixer agent working on the public GitHub repo: pussycat186/nexo-messenger.
+Primary goal: make GitHub Actions green for BOTH Edge (TypeScript/Vite) and Rust Core without altering app/business logic.
+Operate SAFELY with strong guardrails: branch-only edits, minimal/idempotent diffs, verbose logs, auto-diagnosis and fallbacks.
+
+===============================================================================
+0) GLOBAL SAFETY, PRE-FLIGHT, BRANCH STRATEGY
+===============================================================================
+- Never commit to main.
+- Use branch name: fix/ci-ultra (create it if missing; if exists, pull latest).
+- Print environment info: node -v, npm -v, rustc -V, cargo -V (if available).
+- Show concise repo tree for these paths if they exist:
+  .github/workflows/*, package.json, package-lock.json, pnpm-lock.yaml, yarn.lock,
+  server/**, edge/**, web/**, apps/**, server/core-rust/**, rust/**, backend/**
+- Confirm git remote and current branch; fail early if detached.
+
+===============================================================================
+1) DISCOVERY (AUTO-DETECT PATHS)
+===============================================================================
+Detect directories:
+- EDGE_DIR: directory that contains the FRONTEND "package.json" with a usable "build" script (Vite/React/etc). Preference order:
+  ".", "edge", "web", "frontend", "apps/web", "apps/edge"
+  Select the first path where package.json exists AND has a "build" script.
+- FRONT_BUILD_DIR (runtime, at CI time): usually "dist" or "build". We will detect it dynamically in workflow by scanning for index.html.
+- RUST_DIR: directory that contains Cargo.toml for the Rust HTTP server (default guess: "server/core-rust"). If not found there, search:
+  "server/core-rust", "server/rust", "rust", "backend/core-rust", "backend", "apps/core-rust"
+
+Echo the chosen EDGE_DIR and RUST_DIR. Abort if none found.
+
+===============================================================================
+2) EDGE (TYPESCRIPT/VITE) — CI THAT REQUIRES ZERO package.json CHANGES
+===============================================================================
+Context:
+- We will NOT install extra deps (no express).
+- We will build the frontend and serve built files via an inline Node http server (in the workflow), exposing GET /health and serving index.html.
+- The inline server will auto-detect build root by scanning for index.html under common folders (dist/, build/, EDGE_DIR/dist, etc).
+
+Action:
+- Create or overwrite ".github/workflows/ci-edge.yml" with EXACT content below,
+  BUT set "defaults.run.working-directory" to the detected EDGE_DIR (replace <EDGE_DIR>), and keep everything else intact.
+
+-----8<----- .github/workflows/ci-edge.yml
+name: CI Edge (TypeScript)
+
+on:
+  push:
+    branches: [ main, fix/**, feature/** ]
+  pull_request:
+
+concurrency:
+  group: ci-edge-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-edge:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: <EDGE_DIR>
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Print NPM scripts
+        run: node -e "console.log(require('./package.json').scripts)"
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Show build output (sanity)
+        run: |
+          echo "::group::build-artifacts"
+          (find . -maxdepth 3 -type d -name dist  -print -exec find {} -maxdepth 1 -type f \; | head -n 200) || true
+          (find . -maxdepth 3 -type d -name build -print -exec find {} -maxdepth 1 -type f \; | head -n 200) || true
+          echo "::endgroup::"
+
+      - name: Start preview server (inline, port 5000)
+        run: |
+          node - <<'NODE' &
+          const http = require('http'), fs = require('fs'), path = require('path'), url = require('url');
+          const port = 5000;
+          // Candidate build roots to search for index.html:
+          const candidates = [
+            path.join(process.cwd(), 'dist'),
+            path.join(process.cwd(), 'build'),
+            path.join(process.cwd(), 'edge', 'dist'),
+            path.join(process.cwd(), 'web', 'dist'),
+            path.join(process.cwd(), 'frontend', 'dist')
+          ];
+          function pickRoot() {
+            for (const p of candidates) {
+              try {
+                if (fs.existsSync(path.join(p, 'index.html'))) return p;
+              } catch {}
+            }
+            // fallback: root dir (will 404 quickly, but logs help)
+            return process.cwd();
+          }
+          const root = pickRoot();
+          console.log('[inline-preview] root =', root, 'port =', port);
+          const server = http.createServer((req,res)=>{
+            if (req.url === '/health') { res.writeHead(200,{'Content-Type':'application/json'}); return res.end('{"status":"ok"}'); }
+            const parsed = url.parse(req.url).pathname || '/';
+            let file = path.join(root, parsed === '/' ? 'index.html' : parsed);
+            fs.readFile(file, (e, data)=>{
+              if (e) { res.writeHead(404); return res.end('not found'); }
+              res.writeHead(200); res.end(data);
+            });
+          });
+          server.listen(port, ()=>console.log('[inline-preview] listening http://localhost:'+port));
+          NODE
+
+      - name: Wait for /health
+        run: |
+          for i in {1..60}; do
+            if curl -fsS http://localhost:5000/health > /dev/null; then
+              echo "Preview ready"; exit 0
+            fi
+            echo "waiting ($i/60)"; sleep 2
+          done
+          echo "Preview not ready"; exit 1
+
+      - name: Smoke tests
+        env:
+          SMOKE_URL: http://localhost:5000
+        run: |
+          if npm run | grep -q "test:smoke"; then
+            npm run test:smoke
+          else
+            echo "No test:smoke script; basic check:"
+            curl -f $SMOKE_URL/ && echo "Basic smoke OK"
+          fi
+
+      - name: Upload logs/artifacts (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-smoke-logs
+          path: |
+            **/npm-debug.log
+            **/logs/**
+            dist/**
+            build/**
+          if-no-files-found: ignore
+-----8<-----
+
+===============================================================================
+3) RUST CORE — MODERN TOOLCHAIN, TESTS, AUTO-DETECT BINARY, ROBUST /HEALTH
+===============================================================================
+Action:
+- Create or overwrite ".github/workflows/ci-rust.yml" with EXACT content below,
+  BUT set "defaults.run.working-directory" to the detected RUST_DIR (replace <RUST_DIR>).
+
+-----8<----- .github/workflows/ci-rust.yml
+name: CI Rust Core
+
+on:
+  push:
+    branches: [ main, fix/**, feature/** ]
+  pull_request:
+
+concurrency:
+  group: ci-rust-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-rust:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: <RUST_DIR>
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            <RUST_DIR>
+
+      - name: Versions
+        run: |
+          rustc -V
+          cargo -V
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Tests (nocapture)
+        env:
+          RUST_BACKTRACE: 1
+        run: cargo test --verbose -- --nocapture
+
+      - name: Build (release)
+        run: cargo build --release
+
+      - name: Run server & wait for /health
+        env:
+          RUST_LOG: info
+          RUST_BACKTRACE: 1
+          PORT: 8000
+        run: |
+          set -e
+          echo "::group::Try cargo run --release"
+          (cargo run --release &) || true
+          PID=$!
+          sleep 1
+          ps -p $PID || true
+          echo "::endgroup::"
+
+          HAS_HEALTH=0
+          for i in {1..20}; do
+            if curl -fsS http://localhost:8000/health > /dev/null; then
+              HAS_HEALTH=1; echo "Server ready via default bin"; break
+            fi
+            sleep 1
+          done
+
+          if [ "$HAS_HEALTH" = "0" ]; then
+            echo "Default run not responding; auto-detecting bin via cargo metadata…"
+            sudo apt-get update -y && sudo apt-get install -y jq >/dev/null
+            BIN=$(cargo metadata --format-version=1 | jq -r '
+              .packages[] | select(.manifest_path|test("Cargo.toml$"))
+              | .targets[] | select(.kind[]=="bin") | .name' | head -n1)
+            echo "Detected bin: ${BIN:-<none>}"
+            if [ -n "$BIN" ]; then
+              pkill -f target/release || true
+              (cargo run --release --bin "$BIN" &) || true
+              PID=$!
+              for i in {1..30}; do
+                if curl -fsS http://localhost:8000/health > /dev/null; then
+                  HAS_HEALTH=1; echo "Server ready via bin=$BIN"; break
+                fi
+                echo "waiting server ($i/30)"; sleep 2
+              done
+            fi
+          fi
+
+          if [ "$HAS_HEALTH" != "1" ]; then
+            echo "::warning::/health not responding on :8000; list target/release for debugging"
+            ls -la target/release || true
+            exit 1
+          fi
+
+          curl -f http://localhost:8000/health
+          kill $PID || true
+-----8<-----
+
+Additionally:
+- If the Rust server currently lacks GET /health on PORT (8000), add a trivial 200-JSON health route consistent with its framework (axum/actix/etc), and ensure binding to 0.0.0.0:${PORT:-8000}. Keep it minimal and idempotent.
+
+===============================================================================
+4) DEV PREVIEW QUALITY-OF-LIFE (ONLY IF NEEDED; NO LOGIC CHANGE)
+===============================================================================
+If running a Node/Express/TS server (e.g., server/index.ts) and the dev preview shows "Cannot GET /",
+add static serving + SPA fallback ONLY IF they are missing — do not duplicate:
+
+[ESM TypeScript template to inject if missing]
+----------------------------------------------------------------
+import express from "express";
+import path from "path";
+import { fileURLToPath } from "url";
+
+const app = /* use existing app if defined */ (globalThis.__APP__ || express());
+const PORT = Number(process.env.PORT) || 5000;
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+
+// Serve built UI (adjust path if your build outputs elsewhere)
+const distDir = path.resolve(__dirname, "../dist");
+app.use(express.static(distDir));
+
+// SPA fallback
+app.get("*", (_req, res) => res.sendFile(path.join(distDir, "index.html")));
+
+// Start only if not already listening in existing code:
+if (!app.__LISTENING__) {
+  app.listen(PORT, () => {
+    app.__LISTENING__ = true;
+    console.log(`[express] listening on :${PORT}, static=${distDir}`);
+  });
+}
+----------------------------------------------------------------
+
+If the project is CommonJS, adapt __dirname usage accordingly. This step is OPTIONAL and should be applied only if the preview truly needs it.
+
+===============================================================================
+5) LOCAL VERIFICATION (IN REPLIT)
+===============================================================================
+- In EDGE_DIR:
+  npm ci && npm run build
+- In RUST_DIR:
+  cargo fmt --all
+  cargo clippy --all-targets --all-features -- -D warnings
+  cargo test --verbose
+  (cargo run --release &) ; poll http://localhost:8000/health ; kill the process
+
+If any step fails, do minimal/idempotent fixes and re-run until clean.
+
+===============================================================================
+6) COMMIT, PUSH, OPEN PR
+===============================================================================
+- git add .github/workflows/ci-edge.yml .github/workflows/ci-rust.yml
+  (+ any minimal health route addition if it was missing)
+- Commit messages (separate, clear):
+  1) "ci(edge): inline preview w/ auto root scan + robust /health wait"
+  2) "ci(rust): stable toolchain + fmt/clippy/tests + bin autodetect + /health wait"
+  3) If applied: "chore(dev): static serve + SPA fallback (no logic change)"
+- Push branch: fix/ci-ultra
+- Open PR to main titled:
+  "CI ultra-fix: Edge inline preview + Rust toolchain/tests/bin autodetect/health"
+  Body: Explain changes, emphasize no business logic changes, list local verification steps and outputs.
+
+===============================================================================
+7) ACCEPTANCE CRITERIA
+===============================================================================
+- CI Edge job: passes build, preview, /health wait, and smoke/basic curl.
+- CI Rust job: passes fmt, clippy, tests; builds; runs server; /health responds on :8000.
+- Logs/artifacts sufficient to debug future failures.
+- Code changes are minimal, idempotent, and avoid altering app behavior.

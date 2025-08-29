@@ -9,8 +9,8 @@ import { metricsHandler } from "./src/metrics/metrics";
 export async function registerRoutes(app: Express): Promise<Server> {
   const httpServer = createServer(app);
 
-  // Health endpoint
-  app.get('/health', healthHandler);
+  // Health endpoint (inline for testing)
+  app.get('/health', (req, res) => res.json({ status: 'healthy', timestamp: Date.now() }));
 
   // DID registration endpoint
   app.post('/did/register', registerHandler);

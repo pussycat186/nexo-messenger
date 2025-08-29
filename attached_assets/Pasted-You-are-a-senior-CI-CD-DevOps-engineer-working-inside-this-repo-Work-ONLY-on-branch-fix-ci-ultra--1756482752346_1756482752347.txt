@@ -1,0 +1,55 @@
+You are a senior CI/CD DevOps engineer working inside this repo.
+Work ONLY on branch: fix/ci-ultra. Do not touch main.
+
+GOAL
+Fix formatting issues in two GitHub Actions workflows so runs don’t fail due to YAML/step truncation:
+  - .github/workflows/ci-edge.yml
+  - .github/workflows/ci-rust.yml
+
+STRICT RULES
+- Make minimal, idempotent edits.
+- Do not change logic or step order; only fix indentation, missing lines, and ensure a trailing newline.
+- Commit once with a clear message and push to fix/ci-ultra.
+
+TASKS
+
+1) Checkout branch safely
+   - git fetch origin
+   - git checkout -B fix/ci-ultra
+
+2) Validate and fix `.github/workflows/ci-edge.yml`
+   - Ensure the final upload-artifact step ends with the correctly indented `if-no-files-found: ignore`.
+   - Ensure the file ends with a trailing newline.
+   - The block must look EXACTLY like this (indentation matters):
+
+      - name: Upload artifacts (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-logs
+          path: |
+            **/npm-debug.log
+            server.pid
+          if-no-files-found: ignore
+
+3) Validate and fix `.github/workflows/ci-rust.yml`
+   - Ensure the last two lines of the final run step are present and inside the same `run: |` block.
+   - Ensure the file ends with a trailing newline.
+   - The tail of the step must end EXACTLY with:
+
+          if [ "${READY:-0}" != "1" ]; then
+            echo "::warning::/health never responded"; ls -la target/release || true; exit 1
+          fi
+          curl -fsS http://localhost:8000/health && kill $PID || true
+
+4) Safety checks after edits
+   - Re-open both files and print the last 15 lines of each to confirm the blocks are intact and properly indented.
+   - Run a quick YAML syntax check by ensuring no tab characters exist, and that each file ends with a newline.
+
+5) Commit & push
+   - git add .github/workflows/ci-edge.yml .github/workflows/ci-rust.yml
+   - git commit -m "ci: fix trailing newline and complete final run blocks (edge/rust)"
+   - git push -u origin fix/ci-ultra
+
+6) Output
+   - Print ✅ DONE and the GitHub compare/PR URL suggestion for this branch.

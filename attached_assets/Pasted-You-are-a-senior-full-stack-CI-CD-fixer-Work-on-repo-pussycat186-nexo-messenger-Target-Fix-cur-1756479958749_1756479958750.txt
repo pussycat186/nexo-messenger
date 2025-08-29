@@ -1,0 +1,263 @@
+You are a senior full-stack & CI/CD fixer. Work on repo: pussycat186/nexo-messenger.
+Target: Fix current dev/preview bug "Cannot GET /", make local self-tests pass, and harden CI (Edge+Rust).
+RULES:
+- Never commit to main. Use branch: fix/ci-ultra
+- Minimal, idempotent diffs only. No business logic changes.
+- Add clear logs. If uncertain, auto-detect and fallback safely.
+
+===============================================================================
+0) SAFETY & DISCOVERY
+===============================================================================
+1) Print: git status, current branch, remotes; node -v, npm -v, rustc -V, cargo -V (if available).
+2) Detect paths:
+   - EDGE_DIR: choose first with a package.json containing "build" script from: ".", "edge", "web", "frontend", "apps/web", "apps/edge".
+   - RUST_DIR: directory containing Cargo.toml for the HTTP server (prefer "server/core-rust"; otherwise try "server/rust", "rust", "backend", "apps/core-rust").
+3) Echo EDGE_DIR and RUST_DIR; abort if not found.
+
+4) Create/switch branch fix/ci-ultra (create if missing). Pull latest if exists.
+
+===============================================================================
+1) FIX DEV PREVIEW: "Cannot GET /"
+===============================================================================
+Context: Express/TS server starts on PORT=5000 but frontend static UI isn't served → root "/" returns 404.
+Goal: Serve built UI (dist or build) + SPA fallback WITHOUT breaking API routes.
+
+A) Open EDGE_DIR/server/index.ts (or equivalent Node/Express entry: search for files named "server/index.ts", "server.ts", "index.ts" under EDGE_DIR).
+   - Confirm existing API routes (/health, /metrics, /api/*) stay BEFORE our SPA fallback.
+   - Ensure we are using ESM (tsx) in dev; use fileURLToPath for __dirname when needed.
+
+B) Insert (idempotently) the static serve + SPA fallback. Use guard comments to avoid duplicates:
+   // [ci-fix-static-ui] begin
+   // [ci-fix-static-ui] end
+   Between them, write this ESM TypeScript snippet (adjust only if types complain):
+
+   import fs from "fs";
+   import path from "path";
+   import { fileURLToPath } from "url";
+
+   const __filename = fileURLToPath(import.meta.url);
+   const __dirname  = path.dirname(__filename);
+
+   const candidates = [
+     path.resolve(__dirname, "../dist/public"),
+     path.resolve(__dirname, "../dist"),
+     path.resolve(__dirname, "../build"),
+     path.resolve(__dirname, "../../dist"),
+     path.resolve(__dirname, "../../build"),
+   ];
+   let staticRoot: string | null = null;
+   for (const p of candidates) {
+     try {
+       if (fs.existsSync(path.join(p, "index.html"))) { staticRoot = p; break; }
+     } catch {}
+   }
+   if (staticRoot) {
+     console.log(`[express] static UI root = ${staticRoot}`);
+     // IMPORTANT: place AFTER API routes, BEFORE any 404 handler:
+     app.use(express.static(staticRoot));
+     app.get("*", (_req, res) => res.sendFile(path.join(staticRoot!, "index.html")));
+   } else {
+     console.warn("[express] No built UI found — run `npm run build` to generate dist/");
+   }
+
+   NOTES:
+   - Do NOT place this above /health or /api routes.
+   - If code imports 'express' here, reuse the same 'app' variable (no re-create).
+   - If project is CommonJS instead of ESM, adapt __dirname accordingly (but prefer ESM; the repo uses tsx).
+
+C) Local verify (Edge):
+   cd EDGE_DIR
+   npm ci
+   npm run build
+   # Show where index.html is:
+   (ls -la dist || true) && (ls -la dist/public || true) && (ls -la build || true)
+   # Start dev (tsx) and probe:
+   (npm run dev &) ; DEV_PID=$!
+   for i in {1..30}; do curl -fsS http://localhost:5000/health && break || sleep 1; done
+   # Check "/" returns HTML (not "Cannot GET /"):
+   curl -fsS http://localhost:5000/ | head -n 2 || true
+   # If response contains "Cannot GET /" or non-200, re-scan for index.html under EDGE_DIR (up to depth 3),
+   # update candidates accordingly (point to folder containing index.html), restart and re-probe.
+   kill $DEV_PID || true
+
+===============================================================================
+2) RUST SERVER HEALTH (sanity)
+===============================================================================
+A) In RUST_DIR:
+   - Ensure the server reads PORT env (default 8000) and binds 0.0.0.0. Verify GET /health exists (open main/routes files).
+   - If missing, add tiny health route consistent with framework:
+
+   If dependencies include axum:
+     use axum::{routing::get, Router};
+     async fn health() -> axum::Json<serde_json::Value> { axum::Json(serde_json::json!({"status":"healthy"})) }
+     // mount: .route("/health", get(health))
+
+   If actix-web:
+     use actix_web::{get, web, App, HttpResponse, HttpServer, Responder};
+     async fn health() -> impl Responder { HttpResponse::Ok().json(serde_json::json!({"status":"healthy"})) }
+     // mount: .route("/health", web::get().to(health))
+
+   Keep change minimal; DO NOT alter business logic.
+
+B) Local verify (Rust):
+   cargo fmt --all
+   cargo clippy --all-targets --all-features -- -D warnings
+   cargo test --verbose -- --nocapture
+   (PORT=8000 cargo run --release &) ; RP=$!
+   for i in {1..60}; do curl -fsS http://localhost:8000/health && break || (echo "wait $i"; sleep 1); done
+   kill $RP || true
+
+===============================================================================
+3) CI WORKFLOWS (Edge + Rust) — robust & idempotent
+===============================================================================
+A) Overwrite/create .github/workflows/ci-edge.yml with this, replacing <EDGE_DIR>:
+
+name: CI Edge (TypeScript)
+on:
+  push: { branches: [ main, fix/**, feature/** ] }
+  pull_request:
+concurrency: { group: ci-edge-${{ github.ref }}, cancel-in-progress: true }
+jobs:
+  test-edge:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: <EDGE_DIR> } }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: '20', cache: 'npm' }
+      - name: Print scripts
+        run: node -e "console.log(require('./package.json').scripts)"
+      - name: Install deps
+        run: npm ci
+      - name: Build
+        run: npm run build
+      - name: Start app (project server)
+        run: |
+          NODE_ENV=production npm run start & echo $! > server.pid
+          echo "Started with PID=$(cat server.pid)"
+      - name: Wait for /health
+        run: |
+          for i in {1..60}; do
+            if curl -fsS http://localhost:5000/health > /dev/null; then
+              echo "Preview ready"; exit 0
+            fi
+            echo "waiting ($i/60)"; sleep 2
+          done
+          echo "Preview not ready"; exit 1
+      - name: Smoke tests (optional)
+        env: { SMOKE_URL: http://localhost:5000 }
+        run: |
+          if npm run | grep -q "test:smoke"; then
+            npm run test:smoke
+          else
+            echo "No test:smoke; basic probe…"
+            curl -fsS $SMOKE_URL/health
+            curl -fsS $SMOKE_URL/ | head -n 1
+          fi
+      - name: Stop app
+        if: always()
+        run: |
+          [ -f server.pid ] && kill $(cat server.pid) || true
+      - name: Upload artifacts (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge-logs
+          path: |
+            **/npm-debug.log
+            server.pid
+          if-no-files-found: ignore
+
+B) Overwrite/create .github/workflows/ci-rust.yml with this, replacing <RUST_DIR>:
+
+name: CI Rust Core
+on:
+  push: { branches: [ main, fix/**, feature/** ] }
+  pull_request:
+concurrency: { group: ci-rust-${{ github.ref }}, cancel-in-progress: true }
+jobs:
+  test-rust:
+    runs-on: ubuntu-latest
+    defaults: { run: { working-directory: <RUST_DIR> } }
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with: { components: rustfmt, clippy }
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with: { workspaces: <RUST_DIR> }
+      - name: Versions
+        run: |
+          rustc -V && cargo -V
+      - name: Fmt
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Tests
+        env: { RUST_BACKTRACE: 1 }
+        run: cargo test --verbose -- --nocapture
+      - name: Build (release)
+        run: cargo build --release
+      - name: Run server & wait /health
+        env: { RUST_LOG: info, RUST_BACKTRACE: 1, PORT: 8000 }
+        run: |
+          set -e
+          echo "::group::try cargo run --release"
+          (cargo run --release &) || true
+          PID=$!
+          for i in {1..30}; do
+            if curl -fsS http://localhost:8000/health > /dev/null; then echo "health ok"; READY=1; break; fi
+            echo "wait default bin ($i/30)"; sleep 2
+          done
+          echo "::endgroup::"
+          if [ "${READY:-0}" != "1" ]; then
+            echo "auto-detecting bin via cargo metadata…"
+            sudo apt-get update -y && sudo apt-get install -y jq >/dev/null
+            BIN=$(cargo metadata --format-version=1 | jq -r '.packages[]|select(.manifest_path|test("Cargo.toml$"))|.targets[]|select(.kind[]=="bin")|.name' | head -n1)
+            echo "BIN=${BIN:-<none>}"
+            pkill -f target/release || true
+            if [ -n "$BIN" ]; then
+              (cargo run --release --bin "$BIN" &) || true
+              PID=$!
+              for i in {1..30}; do
+                if curl -fsS http://localhost:8000/health > /dev/null; then echo "health ok (bin=$BIN)"; READY=1; break; fi
+                echo "wait detected bin ($i/30)"; sleep 2
+              done
+            fi
+          fi
+          if [ "${READY:-0}" != "1" ]; then
+            echo "::warning::/health never responded"; ls -la target/release || true; exit 1
+          fi
+          curl -fsS http://localhost:8000/health && kill $PID || true
+
+===============================================================================
+4) LOCAL SELF-TEST SUITE
+===============================================================================
+Execute, in order:
+- EDGE: npm ci && npm run build; start dev; curl /health and "/" (must be 200 and "/" not "Cannot GET /"); stop.
+- RUST: fmt → clippy → tests; run on :8000; curl /health; stop.
+If any check fails, auto-fix:
+- If "/" still shows "Cannot GET /": re-locate index.html and adjust staticRoot candidates; re-run.
+- If Rust /health fails: verify bind to 0.0.0.0:${PORT:-8000}; if route missing, add minimal health route (axum/actix) and re-run.
+
+===============================================================================
+5) COMMIT, PUSH, PR
+===============================================================================
+1) git add -A
+2) Commit messages:
+   - "chore(dev): serve static UI + SPA fallback (fix 'Cannot GET /')"
+   - "ci(edge): optional smoke + robust start/stop + /health wait"
+   - "ci(rust): dtolnay toolchain + fmt/clippy/tests + bin autodetect + /health wait"
+3) Push: git push -u origin fix/ci-ultra
+4) Open PR → base=main, head=fix/ci-ultra
+   Title: "CI ultra-fix + dev preview: static UI & SPA fallback"
+   Body: Summary of changes + local test outputs.
+
+===============================================================================
+6) ACCEPTANCE CRITERIA
+===============================================================================
+- Dev preview on :5000 serves UI (no "Cannot GET /"); /health returns 200 JSON.
+- CI Edge job: build ok, /health wait ok, smoke (or basic probe) ok.
+- CI Rust job: fmt+clippy+tests ok; run & /health ok on :8000.
+- Changes are minimal and idempotent. No business logic modified.

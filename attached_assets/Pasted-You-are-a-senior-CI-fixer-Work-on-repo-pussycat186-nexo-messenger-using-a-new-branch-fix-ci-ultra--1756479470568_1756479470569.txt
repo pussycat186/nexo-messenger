@@ -1,0 +1,66 @@
+You are a senior CI fixer. Work on repo pussycat186/nexo-messenger using a new branch fix/ci-ultra (create if missing). Do NOT edit app logic.
+
+GOALS
+1) Make "CI Edge (TypeScript)" green even if there is no `test:smoke` script.
+2) Make "CI Rust Core" green regardless of the final binary name and remove deprecated Actions usage.
+
+CONSTRAINTS
+- Minimal, idempotent diffs.
+- No changes to business code.
+- Add clear logs and artifacts.
+
+TASKS
+
+A) Edge workflow fix (.github/workflows/ci-edge.yml)
+- Replace current workflow with one that:
+  - uses Node 20 and `npm ci`, then `npm run build`.
+  - starts the existing app with `npm run start &` (keep using the project’s own server which already exposes /health).
+  - waits for `http://localhost:5000/health` up to 60s.
+  - RUNS SMOKE TESTS ONLY IF they exist; otherwise fall back to a simple health probe.
+  - uploads logs/artifacts on failure.
+- EXACT "Smoke tests" step to insert:
+
+  name: Smoke tests (optional)
+  env:
+    SMOKE_URL: http://localhost:5000
+  run: |
+    if npm run | grep -q "test:smoke"; then
+      npm run test:smoke
+    else
+      echo "No test:smoke; doing basic probe..."
+      curl -fsS $SMOKE_URL/health
+    fi
+
+- Ensure the "Start server" step sets `NODE_ENV=production` and backgrounds the process, writing its PID to server.pid, then kill it at the end.
+
+B) Rust workflow fix (.github/workflows/ci-rust.yml)
+- Replace actions-rs/toolchain with:
+    uses: dtolnay/rust-toolchain@stable
+  and add `components: rustfmt, clippy`.
+- Add cargo cache via `Swatinem/rust-cache@v2` (workspace = server/core-rust).
+- Use `defaults.run.working-directory: server/core-rust`.
+- Steps order:
+  1) fmt check: `cargo fmt --all -- --check`
+  2) clippy: `cargo clippy --all-targets --all-features -- -D warnings`
+  3) tests: `cargo test --verbose -- --nocapture`
+  4) build: `cargo build --release`
+  5) run + health wait:
+     - Try `(cargo run --release &)`, poll `http://localhost:8000/health` for up to 60s.
+     - If not ready, auto-detect bin name via `cargo metadata | jq` and then `cargo run --release --bin <detected> &`, poll again.
+     - Fail with clear logs if /health never comes up.
+     - Kill the process at the end.
+
+C) Branch & PR
+- Commit messages:
+  - "ci(edge): optional smoke + /health wait; robust start/stop"
+  - "ci(rust): toolchain via dtolnay + fmt/clippy/tests + bin autodetect + /health wait"
+- Push branch `fix/ci-ultra` and open a PR to `main` titled:
+  "CI ultra-fix: Edge optional smoke + Rust stable toolchain & health-run"
+  Include run instructions in the PR body.
+
+D) Sanity checks
+- Print `node -v`, `npm -v`, `rustc -V`, `cargo -V`.
+- Echo whether `test:smoke` exists.
+- When waiting for /health, log retries (1..60).
+
+Deliverables: updated ci-edge.yml and ci-rust.yml, PR URL, and a summary of what changed.

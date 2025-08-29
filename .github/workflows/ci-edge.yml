@@ -12,9 +12,6 @@ concurrency:
 jobs:
   test-edge:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: .
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -22,8 +19,16 @@ jobs:
           node-version: '20'
           cache: 'npm'
 
-      - name: Print NPM scripts
-        run: node -e "console.log(require('./package.json').scripts)"
+      - name: Sanity checks
+        run: |
+          node -v
+          npm -v
+          echo "Checking if test:smoke script exists:"
+          if npm run | grep -q "test:smoke"; then
+            echo "✓ test:smoke script found"
+          else
+            echo "ℹ test:smoke script not found - will use basic health probe"
+          fi
 
       - name: Install deps
         run: npm ci
@@ -31,68 +36,43 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Show build output (sanity)
+      - name: Start server
+        env:
+          NODE_ENV: production
         run: |
-          echo "::group::build-artifacts"
-          (find . -maxdepth 3 -type d -name dist  -print -exec find {} -maxdepth 1 -type f \; | head -n 200) || true
-          (find . -maxdepth 3 -type d -name build -print -exec find {} -maxdepth 1 -type f \; | head -n 200) || true
-          echo "::endgroup::"
-
-      - name: Start preview server (inline, port 5000)
-        run: |
-          node - <<'NODE' &
-          const http = require('http'), fs = require('fs'), path = require('path'), url = require('url');
-          const port = 5000;
-          // Candidate build roots to search for index.html:
-          const candidates = [
-            path.join(process.cwd(), 'dist'),
-            path.join(process.cwd(), 'build'),
-            path.join(process.cwd(), 'edge', 'dist'),
-            path.join(process.cwd(), 'web', 'dist'),
-            path.join(process.cwd(), 'frontend', 'dist')
-          ];
-          function pickRoot() {
-            for (const p of candidates) {
-              try {
-                if (fs.existsSync(path.join(p, 'index.html'))) return p;
-              } catch {}
-            }
-            // fallback: root dir (will 404 quickly, but logs help)
-            return process.cwd();
-          }
-          const root = pickRoot();
-          console.log('[inline-preview] root =', root, 'port =', port);
-          const server = http.createServer((req,res)=>{
-            if (req.url === '/health') { res.writeHead(200,{'Content-Type':'application/json'}); return res.end('{"status":"ok"}'); }
-            const parsed = url.parse(req.url).pathname || '/';
-            let file = path.join(root, parsed === '/' ? 'index.html' : parsed);
-            fs.readFile(file, (e, data)=>{
-              if (e) { res.writeHead(404); return res.end('not found'); }
-              res.writeHead(200); res.end(data);
-            });
-          });
-          server.listen(port, ()=>console.log('[inline-preview] listening http://localhost:'+port));
-          NODE
+          npm run start &
+          echo $! > server.pid
+          echo "Started server with PID $(cat server.pid)"
 
       - name: Wait for /health
         run: |
           for i in {1..60}; do
             if curl -fsS http://localhost:5000/health > /dev/null; then
-              echo "Preview ready"; exit 0
+              echo "Server ready on http://localhost:5000/health"; exit 0
             fi
-            echo "waiting ($i/60)"; sleep 2
+            echo "waiting for health endpoint ($i/60)"; sleep 1
           done
-          echo "Preview not ready"; exit 1
+          echo "Health endpoint not ready after 60s"; exit 1
 
-      - name: Smoke tests
+      - name: Smoke tests (optional)
         env:
           SMOKE_URL: http://localhost:5000
         run: |
           if npm run | grep -q "test:smoke"; then
             npm run test:smoke
           else
-            echo "No test:smoke script; basic check:"
-            curl -f $SMOKE_URL/ && echo "Basic smoke OK"
+            echo "No test:smoke; doing basic probe..."
+            curl -fsS $SMOKE_URL/health
+          fi
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f server.pid ]; then
+            PID=$(cat server.pid)
+            echo "Killing server with PID $PID"
+            kill $PID || true
+            rm server.pid
           fi
 
       - name: Upload logs/artifacts (always)
@@ -105,4 +85,5 @@ jobs:
             **/logs/**
             dist/**
             build/**
+            server.pid
           if-no-files-found: ignore

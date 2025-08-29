@@ -29,7 +29,7 @@ jobs:
           workspaces: |
             server/core-rust
 
-      - name: Versions
+      - name: Sanity checks
         run: |
           rustc -V
           cargo -V
@@ -63,11 +63,11 @@ jobs:
           echo "::endgroup::"
 
           HAS_HEALTH=0
-          for i in {1..20}; do
+          for i in {1..60}; do
             if curl -fsS http://localhost:8000/health > /dev/null; then
               HAS_HEALTH=1; echo "Server ready via default bin"; break
             fi
-            sleep 1
+            echo "waiting for health endpoint ($i/60)"; sleep 1
           done
 
           if [ "$HAS_HEALTH" = "0" ]; then
@@ -81,11 +81,11 @@ jobs:
               pkill -f target/release || true
               (cargo run --release --bin "$BIN" &) || true
               PID=$!
-              for i in {1..30}; do
+              for i in {1..60}; do
                 if curl -fsS http://localhost:8000/health > /dev/null; then
                   HAS_HEALTH=1; echo "Server ready via bin=$BIN"; break
                 fi
-                echo "waiting server ($i/30)"; sleep 2
+                echo "waiting for health endpoint with bin ($i/60)"; sleep 1
               done
             fi
           fi

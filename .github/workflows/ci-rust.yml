@@ -1,100 +1,60 @@
 name: CI Rust Core
-
 on:
-  push:
-    branches: [ main, fix/**, feature/** ]
+  push: { branches: [ main, fix/**, feature/** ] }
   pull_request:
-
-concurrency:
-  group: ci-rust-${{ github.ref }}
-  cancel-in-progress: true
-
+concurrency: { group: ci-rust-${{ github.ref }}, cancel-in-progress: true }
 jobs:
   test-rust:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: server/core-rust
+    defaults: { run: { working-directory: server/core-rust } }
     steps:
       - uses: actions/checkout@v4
-
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
+        with: { components: rustfmt, clippy }
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: |
-            server/core-rust
-
-      - name: Sanity checks
+        with: { workspaces: server/core-rust }
+      - name: Versions
         run: |
-          rustc -V
-          cargo -V
-
-      - name: Check formatting
+          rustc -V && cargo -V
+      - name: Fmt
         run: cargo fmt --all -- --check
-
-      - name: Clippy (deny warnings)
+      - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
-
-      - name: Tests (nocapture)
-        env:
-          RUST_BACKTRACE: 1
+      - name: Tests
+        env: { RUST_BACKTRACE: 1 }
         run: cargo test --verbose -- --nocapture
-
       - name: Build (release)
         run: cargo build --release
-
-      - name: Run server & wait for /health
-        env:
-          RUST_LOG: info
-          RUST_BACKTRACE: 1
-          PORT: 8000
+      - name: Run server & wait /health
+        env: { RUST_LOG: info, RUST_BACKTRACE: 1, PORT: 8000 }
         run: |
           set -e
-          echo "::group::Try cargo run --release"
+          echo "::group::try cargo run --release"
           (cargo run --release &) || true
           PID=$!
-          sleep 1
-          ps -p $PID || true
-          echo "::endgroup::"
-
-          HAS_HEALTH=0
-          for i in {1..60}; do
-            if curl -fsS http://localhost:8000/health > /dev/null; then
-              HAS_HEALTH=1; echo "Server ready via default bin"; break
-            fi
-            echo "waiting for health endpoint ($i/60)"; sleep 1
+          for i in {1..30}; do
+            if curl -fsS http://localhost:8000/health > /dev/null; then echo "health ok"; READY=1; break; fi
+            echo "wait default bin ($i/30)"; sleep 2
           done
-
-          if [ "$HAS_HEALTH" = "0" ]; then
-            echo "Default run not responding; auto-detecting bin via cargo metadata…"
+          echo "::endgroup::"
+          if [ "${READY:-0}" != "1" ]; then
+            echo "auto-detecting bin via cargo metadata…"
             sudo apt-get update -y && sudo apt-get install -y jq >/dev/null
-            BIN=$(cargo metadata --format-version=1 | jq -r '
-              .packages[] | select(.manifest_path|test("Cargo.toml$"))
-              | .targets[] | select(.kind[]=="bin") | .name' | head -n1)
-            echo "Detected bin: ${BIN:-<none>}"
+            BIN=$(cargo metadata --format-version=1 | jq -r '.packages[]|select(.manifest_path|test("Cargo.toml$"))|.targets[]|select(.kind[]=="bin")|.name' | head -n1)
+            echo "BIN=${BIN:-<none>}"
+            pkill -f target/release || true
             if [ -n "$BIN" ]; then
-              pkill -f target/release || true
               (cargo run --release --bin "$BIN" &) || true
               PID=$!
-              for i in {1..60}; do
-                if curl -fsS http://localhost:8000/health > /dev/null; then
-                  HAS_HEALTH=1; echo "Server ready via bin=$BIN"; break
-                fi
-                echo "waiting for health endpoint with bin ($i/60)"; sleep 1
+              for i in {1..30}; do
+                if curl -fsS http://localhost:8000/health > /dev/null; then echo "health ok (bin=$BIN)"; READY=1; break; fi
+                echo "wait detected bin ($i/30)"; sleep 2
               done
             fi
           fi
-
-          if [ "$HAS_HEALTH" != "1" ]; then
-            echo "::warning::/health not responding on :8000; list target/release for debugging"
-            ls -la target/release || true
-            exit 1
+          if [ "${READY:-0}" != "1" ]; then
+            echo "::warning::/health never responded"; ls -la target/release || true; exit 1
           fi
-
-          curl -f http://localhost:8000/health
-          kill $PID || true
+          curl -fsS http://localhost:8000/health && kill $PID || true

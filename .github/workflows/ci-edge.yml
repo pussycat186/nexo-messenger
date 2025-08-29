@@ -1,89 +1,55 @@
 name: CI Edge (TypeScript)
-
 on:
-  push:
-    branches: [ main, fix/**, feature/** ]
+  push: { branches: [ main, fix/**, feature/** ] }
   pull_request:
-
-concurrency:
-  group: ci-edge-${{ github.ref }}
-  cancel-in-progress: true
-
+concurrency: { group: ci-edge-${{ github.ref }}, cancel-in-progress: true }
 jobs:
   test-edge:
     runs-on: ubuntu-latest
+    defaults: { run: { working-directory: . } }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-
-      - name: Sanity checks
-        run: |
-          node -v
-          npm -v
-          echo "Checking if test:smoke script exists:"
-          if npm run | grep -q "test:smoke"; then
-            echo "✓ test:smoke script found"
-          else
-            echo "ℹ test:smoke script not found - will use basic health probe"
-          fi
-
+        with: { node-version: '20', cache: 'npm' }
+      - name: Print scripts
+        run: node -e "console.log(require('./package.json').scripts)"
       - name: Install deps
         run: npm ci
-
       - name: Build
         run: npm run build
-
-      - name: Start server
-        env:
-          NODE_ENV: production
+      - name: Start app (project server)
         run: |
-          npm run start &
-          echo $! > server.pid
-          echo "Started server with PID $(cat server.pid)"
-
+          NODE_ENV=production npm run start & echo $! > server.pid
+          echo "Started with PID=$(cat server.pid)"
       - name: Wait for /health
         run: |
           for i in {1..60}; do
             if curl -fsS http://localhost:5000/health > /dev/null; then
-              echo "Server ready on http://localhost:5000/health"; exit 0
+              echo "Preview ready"; exit 0
             fi
-            echo "waiting for health endpoint ($i/60)"; sleep 1
+            echo "waiting ($i/60)"; sleep 2
           done
-          echo "Health endpoint not ready after 60s"; exit 1
-
+          echo "Preview not ready"; exit 1
       - name: Smoke tests (optional)
-        env:
-          SMOKE_URL: http://localhost:5000
+        env: { SMOKE_URL: http://localhost:5000 }
         run: |
           if npm run | grep -q "test:smoke"; then
             npm run test:smoke
           else
-            echo "No test:smoke; doing basic probe..."
+            echo "No test:smoke; basic probe…"
             curl -fsS $SMOKE_URL/health
+            curl -fsS $SMOKE_URL/ | head -n 1
           fi
-
-      - name: Stop server
+      - name: Stop app
         if: always()
         run: |
-          if [ -f server.pid ]; then
-            PID=$(cat server.pid)
-            echo "Killing server with PID $PID"
-            kill $PID || true
-            rm server.pid
-          fi
-
-      - name: Upload logs/artifacts (always)
+          [ -f server.pid ] && kill $(cat server.pid) || true
+      - name: Upload artifacts (always)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: edge-smoke-logs
+          name: edge-logs
           path: |
             **/npm-debug.log
-            **/logs/**
-            dist/**
-            build/**
             server.pid
           if-no-files-found: ignore

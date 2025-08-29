@@ -1,0 +1,162 @@
+You are a senior Rust + TypeScript engineer. Make CI green.
+
+## What to do (exact steps)
+
+1) Mirror CI locally
+- Rust:
+  - cd server/core-rust
+  - rustup show (install stable if missing; ensure rustfmt & clippy)
+  - cargo fmt --all -- --check
+  - cargo clippy --all-targets --all-features -D warnings
+  - cargo test --all
+- Edge/TypeScript:
+  - cd ../../
+  - npm ci
+  - npm run typecheck
+  - npm run build
+
+2) If anything fails, fix code & config until all of the above pass locally. Then commit & push.
+
+## Specific fixes to apply
+
+A) Dependencies (server/core-rust/Cargo.toml)
+Replace the [dependencies] section with exactly:
+[dependencies]
+axum = { version = "0.7", features = ["ws", "macros", "json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+ed25519 = "2"
+ed25519-dalek = "2"
+base64 = "0.22"
+rand = "0.8"
+anyhow = "1"
+
+Also ensure server/core-rust/rust-toolchain.toml exists with:
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+profile = "minimal"
+
+B) Rewrite server/core-rust/src/cosign.rs (compile with ed25519 v2 + ed25519-dalek v2)
+Implement this module:
+
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use ed25519::{Signature, Signer, Verifier};
+use ed25519_dalek::{SigningKey, VerifyingKey};
+use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct SignatureData {
+    pub cosigner: String,
+    pub sig: String, // base64(signature bytes)
+}
+
+pub struct Cosigner {
+    pub id: String,
+    pub signing: SigningKey,
+    pub verifying: VerifyingKey,
+}
+
+// Generate 3 cosigners in dev (could be read from env/secret later)
+pub fn load_cosigners() -> Vec<Cosigner> {
+    (0..3)
+        .map(|i| {
+            let signing = SigningKey::generate(&mut OsRng);
+            let verifying = signing.verifying_key();
+            Cosigner {
+                id: format!("cosigner_{}", i),
+                signing,
+                verifying,
+            }
+        })
+        .collect()
+}
+
+// Sign message hash and return base64 signature for each cosigner, but stop when threshold is reached
+pub fn sign_sth(sth_bytes: &[u8], cosigners: &[Cosigner], threshold: usize) -> Vec<SignatureData> {
+    let mut out = Vec::new();
+    for c in cosigners {
+        let sig: Signature = c.signing.sign(sth_bytes);
+        out.push(SignatureData {
+            cosigner: c.id.clone(),
+            sig: BASE64.encode(sig.to_bytes()),
+        });
+        if out.len() >= threshold {
+            break;
+        }
+    }
+    out
+}
+
+pub fn verify_threshold(
+    message: &[u8],
+    signatures: &[SignatureData],
+    cosigners: &[Cosigner],
+    threshold: usize,
+) -> bool {
+    let mut ok = 0usize;
+    for s in signatures {
+        if let Some(c) = cosigners.iter().find(|c| c.id == s.cosigner) {
+            if let Ok(sig_bytes) = BASE64.decode(&s.sig) {
+                if let Ok(sig) = Signature::from_bytes(
+                    sig_bytes
+                        .as_slice()
+                        .try_into()
+                        .unwrap_or_else(|_| [0u8; 64]),
+                ) {
+                    if c.verifying.verify(message, &sig).is_ok() {
+                        ok += 1;
+                        if ok >= threshold {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ok >= threshold
+}
+
+C) Fix timestamp privacy in server/core-rust/src/routes.rs
+- In the STH struct, make fields public:
+  pub struct STH {
+      pub tree_size: usize,
+      pub root: String,
+      pub timestamp: i64,
+  }
+- Ensure all code referencing STH still compiles (imports unchanged).
+
+D) Fix tracing init in server/core-rust/src/main.rs
+- Add:
+    use tracing_subscriber;
+    fn init_tracing() {
+        let _ = tracing_subscriber::fmt().with_target(false).try_init();
+    }
+- Call init_tracing() at the very start of main().
+- Remove unused imports and unused variables (prefix unused with underscore).
+
+E) Make CI parity strict
+- Run locally:
+    cd server/core-rust
+    cargo fmt --all
+    cargo clippy --all-targets --all-features -D warnings
+    cargo test --all
+    cd ../../
+    npm ci
+    npm run typecheck
+    npm run build
+- If clippy flags unused imports/vars, fix them properly (no #[allow] unless absolutely necessary).
+
+3) Commit & push
+- If all commands pass, run:
+  git add -A
+  git commit -m "ci: make Rust core compile & pass fmt/clippy/tests; rewrite cosign; expose STH.timestamp; add tracing+rand"
+  git push origin main
+
+Deliverable: CI Rust Core and Test Rust turn green on GitHub Actions on the next run.

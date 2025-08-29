@@ -10,6 +10,7 @@ use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
 use tracing::{info, warn};
+use tracing_subscriber;
 
 mod cosign;
 mod merkle;
@@ -31,10 +32,13 @@ pub struct AppState {
     ws_sessions: Arc<RwLock<HashMap<String, tokio::sync::mpsc::UnboundedSender<String>>>>,
 }
 
+fn init_tracing() {
+    let _ = tracing_subscriber::fmt().with_target(false).try_init();
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    use tracing_subscriber::fmt;
-    let _ = tracing_subscriber::fmt().with_target(false).try_init();
+    init_tracing();
 
     let storage = Arc::new(FileStorage::new("server/_data")?);
     let ws_sessions = Arc::new(RwLock::new(HashMap::new()));

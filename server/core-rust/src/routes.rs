@@ -25,10 +25,9 @@ pub struct DIDRegistration {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct STH {
+    pub tree_size: usize,
     pub root: String,
-    pub tree_size: u64,
     pub timestamp: i64,
-    pub signatures: Vec<crate::cosign::SignatureData>,
 }
 
 #[derive(Deserialize)]
@@ -52,7 +51,10 @@ pub async fn health_handler(
 
     Ok(Json(HealthResponse {
         status: "healthy".to_string(),
-        timestamp: chrono::Utc::now().timestamp(),
+        timestamp: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64,
         users_count,
         sth_count,
     }))

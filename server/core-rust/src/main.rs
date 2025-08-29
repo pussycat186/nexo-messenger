@@ -32,10 +32,9 @@ pub struct AppState {
 }
 
 #[tokio::main]
-async fn main
-{
-    init_tracing();() -> anyhow::Result<()> {
-    tracing_subscriber::init();
+async fn main() -> anyhow::Result<()> {
+    use tracing_subscriber::fmt;
+    let _ = tracing_subscriber::fmt().with_target(false).try_init();
 
     let storage = Arc::new(FileStorage::new("server/_data")?);
     let ws_sessions = Arc::new(RwLock::new(HashMap::new()));

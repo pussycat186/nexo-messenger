@@ -1,0 +1,149 @@
+ROLE
+You are the lead DevOps + backend engineer for this repo. You are allowed to edit/overwrite files, run shell commands, and commit & push.
+
+GOAL
+Fix the Rust core so it compiles and passes CI while keeping the API/architecture intact.
+
+TASKS (do sequentially, idempotent)
+
+Update Rust dependencies
+Open server/core-rust/Cargo.toml and overwrite its contents with:
+
+[package]
+name = "nexo-core"
+version = "1.0.0"
+edition = "2021"
+
+[dependencies]
+axum = { version = "0.7", features = ["ws", "macros", "json"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+ed25519-dalek = "2"
+ed25519 = "2"
+rand = "0.8"
+base64 = "0.22"
+anyhow = "1"
+
+
+Rewrite cosign.rs compatible with ed25519 v2
+Open (or create) server/core-rust/src/cosign.rs and overwrite it with:
+
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use ed25519::{Signature, Verifier};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use rand::rngs::OsRng;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SignatureData {
+    pub cosigner: String,
+    pub sig: String, // base64
+}
+
+pub struct Cosigner {
+    pub id: String,
+    pub signing: SigningKey,
+    pub verifying: VerifyingKey,
+}
+
+pub fn load_cosigners() -> Vec<Cosigner> {
+    let mut cosigners = Vec::new();
+    for i in 0..3 {
+        let mut rng = OsRng;
+        let signing = SigningKey::generate(&mut rng);
+        let verifying = signing.verifying_key();
+        cosigners.push(Cosigner {
+            id: format!("cosigner_{}", i),
+            signing,
+            verifying,
+        });
+    }
+    cosigners
+}
+
+pub fn sign_sth(sth_hash: &[u8], cosigners: &[Cosigner]) -> Vec<SignatureData> {
+    let mut signatures = Vec::new();
+    for cosigner in cosigners.iter().take(3) {
+        let signature = cosigner.signing.sign(sth_hash);
+        signatures.push(SignatureData {
+            cosigner: cosigner.id.clone(),
+            sig: BASE64.encode(signature.to_bytes()),
+        });
+        if signatures.len() >= 2 {
+            break; // threshold 2-of-3
+        }
+    }
+    signatures
+}
+
+pub fn verify_threshold(
+    sth_hash: &[u8],
+    signatures: &[SignatureData],
+    cosigners: &[Cosigner],
+    threshold: usize,
+) -> bool {
+    let mut valid_count = 0;
+
+    for sig_data in signatures {
+        if let Some(cosigner) = cosigners.iter().find(|c| c.id == sig_data.cosigner) {
+            if let Ok(sig_bytes) = BASE64.decode(&sig_data.sig) {
+                if let Ok(signature) = Signature::from_slice(&sig_bytes) {
+                    if cosigner.verifying.verify(sth_hash, &signature).is_ok() {
+                        valid_count += 1;
+                    }
+                }
+            }
+        }
+    }
+    valid_count >= threshold
+}
+
+
+Expose timestamp so metrics can read it
+In server/core-rust/src/routes.rs, locate the struct STH { ... } and make sure the timestamp field is pub. Example:
+
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+pub struct STH {
+    pub root: String,
+    pub tree_size: u64,
+    pub timestamp: i64, // must be pub
+    pub signatures: Vec<crate::cosign::SignatureData>,
+}
+
+
+Initialize tracing subscriber safely
+In server/core-rust/src/main.rs:
+
+Add use tracing_subscriber::fmt; at the top if missing.
+
+At the start of #[tokio::main] async fn main(), insert:
+
+let _ = tracing_subscriber::fmt().with_target(false).try_init();
+
+
+(Optional) Format & build locally
+If cargo is available in this environment, run:
+
+cd server/core-rust && cargo fmt --all && cargo build -q || true && cd -
+
+
+Commit & push
+Run:
+
+git add -A
+git commit -m "fix(rust): stabilize cosign with ed25519 v2, add rand+tracing-subscriber, expose STH.timestamp" || true
+git push origin main
+
+
+ACCEPTANCE
+
+Push succeeds.
+
+GitHub Actions reruns and Rust jobs should turn green.
+
+TypeScript/Edge CI may still fail (that’s separate), don’t change anything outside the scope above.

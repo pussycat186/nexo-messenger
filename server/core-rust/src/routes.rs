@@ -25,24 +25,10 @@ pub struct DIDRegistration {
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct STH {
-    tree_size: usize,
-    root: String,
-    prev_hash: String,
-    policy: Policy,
-    pub pub timestamp: i64,
-    signatures: Vec<Signature>,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Policy {
-    t: u8,
-    n: u8,
-}
-
-#[derive(Serialize, Deserialize, Clone)]
-pub struct Signature {
-    cosigner: String,
-    sig: String,
+    pub root: String,
+    pub tree_size: u64,
+    pub timestamp: i64,
+    pub signatures: Vec<crate::cosign::SignatureData>,
 }
 
 #[derive(Deserialize)]

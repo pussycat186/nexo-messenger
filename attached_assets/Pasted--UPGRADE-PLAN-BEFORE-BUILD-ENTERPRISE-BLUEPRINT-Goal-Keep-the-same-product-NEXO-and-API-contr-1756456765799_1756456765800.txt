@@ -1,0 +1,131 @@
+⬆️ UPGRADE PLAN BEFORE BUILD — ENTERPRISE BLUEPRINT
+
+Goal
+Keep the same product (NEXO) and API contracts, but upgrade the architecture to be enterprise-ready, high-performance, and migration-friendly to Rust/Go later. You must still work within Replit limits for now (no Docker/Rust at runtime), yet design clean ports/adapters so we can swap transports/storage/crypto engines without touching APIs.
+
+Non-negotiable API (unchanged)
+- GET /health → {status:"healthy", timestamp:int, users_count:int, sth_count:int}
+- POST /did/register JSON {id:string, public_key:base64(raw 32B), timestamp:int} → append leaf, emit new STH
+- GET /sth/latest → 200 latest or 404 {detail:"No STH found"}
+- GET /sth/chain?limit=N → newest-first list
+- WS /ws/{session_id} → relay opaque envelopes {from,to,payload} (no server decryption)
+
+Enterprise Targets
+- Privacy-by-default E2EE, real Merkle transparency, 2-of-3 Ed25519 multi-sig
+- Smooth UX & low latency path comparable to best-in-class messengers
+- Cross-platform ready: Web now, Mobile/Desktop later (skeletons included)
+- On-prem/Cloud ready; CI/CD; Observability; Security hardening; Compliance hooks
+
+Architecture (Hexagonal / Ports & Adapters)
+Create these domain ports and adapters (TypeScript for now; Rust/Go later via drop-in adapters):
+- ports/Storage: appendUserReg(), listUserRegs(), appendSTH(), latestSTH(), listSTH(limit)
+- ports/Crypto: sha256(), ed25519.sign(), ed25519.verify(), base64 encode/decode
+- ports/Cosign: loadKeys(), signSTH(sthWithoutSigs), verifyThreshold(sth, t=2, n=3)
+- ports/Transport: interface for Realtime (WebSocket now, WebTransport/QUIC later)
+- adapters/fileStore (JSONL), nobleCrypto (@noble/ed25519, @noble/hashes), cosignEnv (env or dev-generated keys), wsTransport (ws/@fastify/websocket)
+- metrics: Prometheus exporter with counters & gauges
+
+Transport Abstraction (smooth now, QUIC later)
+- Implement WebSocket transport with heartbeat & backpressure
+- Define Transport interface so we can add WebTransport(QUIC)/SSE later without API changes
+- Normalize URLs & avoid trailing-slash bugs
+
+Crypto & Data (real, not mock)
+- Leaf bytes = sha256( id(UTF-8) || public_key(raw) || timestamp(8-byte big-endian) )
+- Binary Merkle; carry last when odd; root SHA-256
+- STH:
+  { tree_size, root(base64), prev_hash(base64), policy:{t:2,n:3}, timestamp, signatures:[{cosigner,sig(base64)}] }
+- STH hash = sha256(canonical_json(STH without signatures))
+- 2-of-3 Ed25519 signatures; keys from env COSIGNER_{0,1,2}_SK(base64); if absent, auto-generate to server/_secrets/dev_cosigners/ (gitignored)
+- Storage default: server/_data/{users.jsonl, sth.jsonl} (append-only). Provide compaction tool.
+
+Repo Layout (enforce)
+server/
+  src/index.ts (bootstrap 0.0.0.0:PORT)
+  src/routes/{health.ts,register.ts,sth.ts}
+  src/ws/relay.ts
+  src/merkle/{tree.ts,canonical.ts}
+  src/ports/{storage.ts,crypto.ts,cosign.ts,transport.ts}
+  src/adapters/{fileStore.ts,nobleCrypto.ts,cosignEnv.ts,wsTransport.ts}
+  src/metrics/metrics.ts  (/metrics Prometheus)
+web/
+  src/pages/{Chat.tsx,Admin.tsx,Audit.tsx}
+  src/lib/{api.ts,ws.ts,merkle.ts}
+scripts/
+  smoke.sh   (shell wrapper; strips trailing slash)
+  smoke.ts   (Node runner; self-seeding if /sth/latest=404)
+  seed_two_dids.ts (Ed25519 keys → POST two DIDs)
+  audit_merkle.ts   (recompute root from users.jsonl)
+docs/
+  OPENAPI.yml, RUNBOOK.md, SECURITY.md, grafana.json
+.github/workflows/
+  ci.yml (Node build/tests + run server + smoke.ts)
+  release.yml (push to GitHub repo, tag v1.0.0, run public smoke against Replit Deployment)
+
+Security & Performance Hardening
+- Rate limits: /did/register + WS connection surge (token-bucket)
+- Strict CORS allowlist via env, Helmet-style headers, CSP for web
+- Input validation with zod or similar; reject malformed payloads early
+- Structured logs (JSON) with request IDs; redact secrets
+- Memory-safe backpressure on WS; clamp message sizes
+- Prepare key-rotation hooks for cosigners; add /.well-known key transparency document (later)
+
+Observability
+- /metrics Prometheus: process_up, users_count, sth_count, ws_sessions, last_sth_timestamp
+- Add basic tracing hooks (OpenTelemetry stubs) for future Rust/Go migration
+- docs/grafana.json minimal dashboard
+
+Compliance Hooks (stubs, not blocking)
+- Placeholders for SOC2/ISO27001 controls in SECURITY.md (key mgmt, access logs, retention)
+- Data retention flags (env) for purging old raw logs (optional)
+
+Mobile & Desktop Readiness (skeleton only now)
+- Create folder mobile/ with README and minimal React Native/Expo template (no build on Replit; code only)
+- Create folder desktop/ with Tauri/Electron skeleton README
+- Web client must keep crypto & transport in src/lib so mobile/desktop can reuse
+
+Testing & Quality Gates (test-first)
+- Unit tests:
+  - merkle root correctness (fixtures)
+  - STH canonical hash & 2-of-3 verification
+- scripts/smoke.ts does:
+  1) GET /health
+  2) If /sth/latest 404 → auto-seed two DIDs via seed_two_dids.ts
+  3) GET /sth/chain?limit=10
+  4) Verify chain links (prev_hash) + verify signatures threshold
+  5) audit_merkle.ts recompute root from users.jsonl; compare latest STH
+  6) E2EE round-trip via WS envelopes (opaque bytes) between two ephemeral keys
+- CI: run unit tests + start server in background + run smoke.ts against http://127.0.0.1:${PORT}
+
+Replit-friendly Build & Deploy
+- Bind 0.0.0.0:PORT from env; produce a public URL with Replit Deployment
+- Print the public URL at the end and run scripts/smoke.sh against it
+- Provide quickstart blocks (no '#' comments) in README
+- No Docker here, but add Dockerfile + compose.yml stubs for future (commented steps)
+
+Environment Variables (.env.sample)
+PORT=5000
+CORS_ORIGINS=<comma-separated>
+COSIGNER_0_SK= (base64; optional dev)
+COSIGNER_1_SK=
+COSIGNER_2_SK=
+RATE_LIMIT_RPS=10
+MAX_WS_PAYLOAD_BYTES=131072
+
+Deliverables (must be done before you say “build completed”)
+1) Repo layout above created; code compiles
+2) /health, /did/register, /sth/latest, /sth/chain implemented; WS relay works
+3) Real Merkle + 2-of-3 Ed25519 implemented & verified
+4) web/ Chat/Admin/Audit minimal UI wired to API/WS
+5) /metrics works; grafana.json provided
+6) scripts/smoke.sh & smoke.ts PASS:
+   - localhost
+   - public Replit URL (HTTPS + WSS)
+7) CI workflow green; release workflow pushes repo and tags v1.0.0
+8) RUNBOOK.md and SECURITY.md present
+
+After building
+- Print: public URL, smoke summary (PASS), repo URL, commit SHA, tag v1.0.0
+- List clear next steps to swap server adapters to Rust/Go with zero API changes
+
+BEGIN upgrading the plan now and proceed to build with this blueprint.

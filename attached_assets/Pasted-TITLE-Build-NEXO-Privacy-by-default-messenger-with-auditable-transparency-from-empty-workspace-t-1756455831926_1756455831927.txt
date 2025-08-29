@@ -1,0 +1,176 @@
+TITLE: Build NEXO — Privacy-by-default messenger with auditable transparency (from empty workspace to production)
+
+BRAND
+- Product name: NEXO
+- Tagline: "Private by Default"
+- Primary colors: Mint #00BFA6, Tech Purple #6C63FF
+- Icon: chat bubbles + shield (vector, simple)
+
+GLOBAL GOALS (non-negotiable)
+- Deliver a complete, production-ready product:
+  1) Backend API + WS relay (fast, memory-safe; prefer Rust/Axum or Go/Gin)
+  2) Merkle transparency log + 2-of-3 Ed25519 cosigning
+  3) Web client (React + TypeScript + Vite + Tailwind + shadcn/ui) – unless you justify a better choice
+  4) Auditor + smoke tools (Python 3.11: httpx, pynacl, cryptography, rich)
+  5) Docker (multi-stage, non-root) + docker-compose (prod-lite)
+  6) CI (build/test/docker/smoke) + Release (tag → GHCR → deploy → smoke → rollback)
+  7) Public URL (Replit Deployment or Cloudflare Named Tunnel). Smoke must PASS over HTTPS + WSS
+  8) Observability: /metrics (Prometheus) + grafana.json
+  9) Docs: OPENAPI.yml, RUNBOOK.md, SECURITY.md (threat model), README quickstart
+  10) No secrets committed. Dev keys auto-gen under server/_secrets/ (gitignored)
+
+API CONTRACTS (must match exactly for compatibility)
+- GET /health  → 200 {status:"healthy", timestamp:int, users_count:int, sth_count:int}
+- POST /did/register (JSON) → 200 created/updated; body REQUIRED:
+    { id:string, public_key:string(base64 raw 32B), timestamp:int }
+  Appends a leaf, recomputes Merkle, emits new STH with multi-sig
+- GET /sth/latest → 200 latest STH or 404 {detail:"No STH found"}
+- GET /sth/chain?limit=N (default 10, newest first) → 200 [STH...]
+- WS /ws/{session_id} → opaque ciphertext relay envelopes: {from,to,payload}
+  (No server-side decryption. Heartbeat + backpressure required.)
+
+CRYPTO & DATA RULES
+- Leaf canonical bytes = sha256( id || public_key || timestamp )  // concat UTF-8 for id, raw bytes for public_key (decoded), 8-byte big-endian for timestamp
+- Merkle tree: binary; if odd leaf, carry last up. Root uses SHA-256.
+- STH structure:
+  {
+    "tree_size": int,
+    "root": base64,
+    "prev_hash": base64,             // sha256(canonical_json(prev STH without signatures))
+    "policy": {"t":2,"n":3},
+    "timestamp": int,
+    "signatures": [ {"cosigner":"cosigner_0","sig":base64}, ... ]
+  }
+- STH hash to be signed = sha256(canonical_json(STH without signatures)).
+- Cosigners: 3 Ed25519 keypairs. Threshold: any 2 valid signatures.
+- Keys: read from env COSIGNER_{0,1,2}_SK(base64) in prod; if absent, dev auto-generate to server/_secrets/dev_cosigners/ (gitignored). APIs never return private keys.
+- Storage (default): append-only JSONL
+  - server/_data/users.jsonl   // one line per registration (id, public_key, timestamp)
+  - server/_data/sth.jsonl     // one line per STH emitted
+  Provide compaction tool scripts/compact.py (optional).
+- Optional feature flag "pg" for Postgres, but not required to pass smoke.
+
+REPO LAYOUT (create exactly)
+nexo/
+  server/                 # Rust (Axum) or Go (Gin/Fiber). Explain your pick in logs.
+    src/... (or internal/...)
+    Cargo.toml / go.mod
+  web/                    # React + TS + Vite + Tailwind + shadcn/ui
+    package.json
+    src/pages/{Chat,Admin,Audit}.tsx
+    src/lib/{api.ts, ws.ts}
+  scripts/
+    smoke.sh              # shell runner: strips trailing slash; runs all checks against $URL
+    smoke.py              # python runner for CI, same semantics as smoke.sh
+    seed_two_dids.py      # make two Ed25519 keys and POST {id, public_key, timestamp}
+    audit_merkle.py       # independent auditor (recompute root from raw data)
+  docker/
+    Dockerfile            # multi-stage, non-root, small image; exposes 8000
+    compose.yml           # services: api, (optional) nginx proxy; volume ./server/_data
+  .github/workflows/
+    ci.yml                # lint/format, unit tests, docker build, run smoke.py
+    release.yml           # on tag: build & push GHCR, deploy (Replit or VPS), public smoke, rollback
+  docs/
+    OPENAPI.yml
+    RUNBOOK.md            # operational runbook: bootstrap, tunnel, deploy, rollback
+    SECURITY.md           # threat model & operational security
+    grafana.json          # minimal dashboard
+  README.md, .gitignore, .editorconfig, LICENSE (Apache-2.0), pre-commit config
+
+QUALITY BAR & DONE CRITERIA
+- Unit tests for:
+  - Merkle chain correctness (prev_hash link & recompute)
+  - STH signing/verification (2-of-3 threshold)
+- scripts/smoke.* must PASS in three modes:
+  (A) localhost (uvicorn or server binary) (B) Docker compose (C) public URL (HTTPS + WSS)
+  Steps checked:
+    1) /health
+    2) /sth/latest (if 404 → auto-seed 2 DIDs)
+    3) /sth/chain limit=10
+    4) Verify hash chain + 2-of-3 signatures for each STH
+    5) Recompute Merkle root from server/_data/users.jsonl and compare STH root
+    6) E2EE round-trip: generate two ephemeral keypairs; POST DIDs; exchange ciphertext via WS; ensure symmetry
+- /metrics endpoint exports: process_up, users_count, sth_count, ws_sessions_gauge, last_sth_timestamp
+- CI green on push; Release green on tag. Public smoke log is attached in job artifacts.
+- No secrets in repo. Dev cosigner keys only in gitignored path. All images non-root.
+- README quickstart (copy-paste blocks without '#') and links to RUNBOOK.
+
+EXECUTION PLAN (sequential, checkpointed)
+0) Bootstrap
+   - Detect workspace path (Replit ~ /home/runner or ~/workspace).
+   - Initialize git repo; write README (NEXO brand), LICENSE Apache-2.0, .gitignore, .editorconfig, pre-commit.
+   - Print `pwd` and tree of scaffold.
+
+1) Backend Phase 1 (Rust or Go)
+   - Pick stack (Axum/Tokio strongly preferred). Justify choice (perf, safety, WS).
+   - Implement storage/file_store: append/read JSONL safely (fsync or buffered + atomic rename for compaction).
+   - Implement crypto helpers: base64 decode/encode, sha256; Ed25519 sign/verify with dalek or equivalent.
+   - Implement routes:
+       GET /health
+       POST /did/register → validate JSON, update users.jsonl, emit STH (compute prev_hash, sign with available cosigners, ensure threshold≥2, append sth.jsonl)
+       GET /sth/latest, GET /sth/chain?limit
+   - Unit tests for merkle & cosign. `cargo test -q` (or `go test ./...`) must PASS.
+
+2) WebSocket Relay
+   - WS /ws/{session_id} with heartbeat (ping/pong), backpressure, per-session map.
+   - Message schema: {from,to,payload} (opaque).
+   - Concurrency guards to avoid unbounded memory.
+
+3) Auditor & smoke tools (Python)
+   - seed_two_dids.py: Ed25519 generate (PyNaCl), public_key base64 (raw 32B), create DID id = "did:key:" + base64url(public_key), timestamp = now.
+   - smoke.py: implement the six steps above. Accept URL via env or arg; strip trailing slash; auto-seed if /sth/latest returns 404; pretty output via rich.
+   - smoke.sh: thin wrapper over curl + smoke.py; ensure portable.
+   - audit_merkle.py: recompute root from users.jsonl standalone.
+
+4) Web client (React/TS/Vite)
+   - Pages: Chat (two-panel demo), Admin (latest STH + signatures), Audit (chain table + “Recompute locally”)
+   - Use Tailwind + shadcn/ui; minimal clean UX; .env for API base & WS URL.
+
+5) Packaging
+   - Dockerfile: multi-stage (builder → dist), static binary if Go; for Rust enable LTO + strip; run as non-root, expose 8000.
+   - docker/compose.yml: service api; mount ./server/_data to persist; healthcheck GET /health; optional nginx reverse proxy.
+   - Prove `docker compose up -d` then run `scripts/smoke.sh` against http://127.0.0.1:8000 → PASS.
+
+6) CI (GitHub Actions)
+   - ci.yml: matrix linux-latest; steps:
+       checkout → setup toolchains → lint/format → build → run unit tests →
+       build docker image → run container → run smoke.py against container → upload artifacts (logs)
+   - Status must be green.
+
+7) Release & Deploy
+   - release.yml: on tag v*:
+       build & push GHCR image →
+       deploy target:
+         - default: Replit Deployment OR
+         - alt: SSH to VPS (script placeholder) →
+       fetch public URL → run scripts/smoke.sh via public HTTPS (fail ⇒ rollback)
+   - Print public URL and smoke results at the end.
+
+8) Cloudflare Named Tunnel (if target != purely Replit)
+   - Scripts to create tunnel "nexo", route DNS API_HOST → 127.0.0.1:8000, write ~/.cloudflared/config.yml
+   - RUN it as service; document exact commands in RUNBOOK.md
+   - For Replit-only, optionally skip and rely on Deployment URL.
+
+9) Observability & Security
+   - /metrics endpoint; supply docs/grafana.json
+   - SECURITY.md: threat model, key handling, rate-limit for /did/register and WS connect, CORS allowlist via env
+   - .env.sample for all env variables (PORT, COSIGNER_* etc)
+
+10) Finalization
+   - Ensure smoke PASS (local, docker, public).
+   - Push to new GitHub repo "nexo", create release v1.0.0, attach artifacts.
+   - Print: repo URL, public URL, final smoke summary (all PASS), commit SHA.
+
+INPUTS (ask user or use defaults)
+- API_HOST (e.g., api.nexo.chat) [optional] — if not provided, use Replit Deployment URL
+- DEPLOY_TARGET = replit (default) | vps
+- Generate dev cosigner keys automatically if env not provided
+
+GUARDRAILS & IDP
+- Idempotent scripts; tolerate reruns.
+- Never commit secrets. Only dev keys in server/_secrets/ (gitignored).
+- Normalize URLs: strip trailing slash before concatenating paths.
+- Don’t block on interactive prompts; assume sensible defaults, log them, and proceed.
+
+BEGIN EXECUTION
+Proceed step by step; after each phase, print a concise progress log and the next action. If a step fails, fix and retry (up to 3 attempts) and include the diff or error cause in the log.

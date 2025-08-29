@@ -1,0 +1,109 @@
+TITLE: NEXO — Reverse-First, Constraint-Aware, Self-Verifying Build
+
+ROLE
+You are the lead full-stack+DevOps engineer. Start from an empty workspace and ship NEXO: a privacy-by-default messenger with auditable transparency. Work BACKWARDS from tests and contracts. Detect environment limits; if Docker/Rust/Go are unavailable, fall back to the best Replit-native stack while keeping a clean ports/adapters design so we can swap the core later without breaking APIs.
+
+NON-NEGOTIABLE CONTRACTS (must pass tests)
+- GET /health → {status:"healthy", timestamp:int, users_count:int, sth_count:int}
+- POST /did/register JSON {id:string, public_key:base64(raw 32B), timestamp:int} → append leaf, emit new STH
+- GET /sth/latest → 200 latest STH or 404 {detail:"No STH found"}
+- GET /sth/chain?limit=N (default 10, newest-first) → [STH...]
+- WS /ws/{session_id} → opaque relay envelopes {from,to,payload} (no server decryption; heartbeat/backpressure)
+
+CRYPTO & DATA (real, not mock)
+- Leaf bytes = sha256( id(UTF-8) || public_key(raw) || timestamp(8-byte big-endian) )
+- Binary Merkle; carry last when odd. Root SHA-256.
+- STH (Signed Tree Head):
+  {
+    "tree_size": int,
+    "root": base64,
+    "prev_hash": base64,               // sha256(canonical_json(prev STH without signatures))
+    "policy": {"t":2,"n":3},
+    "timestamp": int,
+    "signatures": [ {"cosigner":"cosigner_0","sig":base64}, ... ]
+  }
+- Hash to sign = sha256(canonical_json(STH without signatures))
+- 2-of-3 Ed25519 signatures. Keys via env COSIGNER_{0,1,2}_SK(base64); dev mode auto-generate into server/_secrets/dev_cosigners/ (gitignored).
+- Storage default: append-only JSONL under server/_data/{users.jsonl, sth.jsonl} (+ compaction tool). Later we can switch to Postgres behind the same port interface.
+
+ENVIRONMENT-AWARE CHOICES
+- If Docker/Rust/Go NOT available → implement core in **TypeScript/Node** with:
+  - HTTP: **Fastify** (or Express if you must) + `@fastify/websocket` or `ws` for WS
+  - Crypto: **@noble/ed25519**, **@noble/hashes** (sha256), **base64-js**
+  - File I/O: streaming append for JSONL, atomic compaction
+  - Process: read PORT from env; Replit Deployment friendly
+- If Rust/Axum or Go/Gin ARE available → use them for the server; keep the same folder layout and tests.
+- ALWAYS design via **ports/adapters**:
+  - `ports/Storage`, `ports/Crypto`, `ports/CosignPolicy`
+  - `adapters/fileStore`, `adapters/nobleCrypto`, `adapters/cosignEnv`
+  - Later we can drop in `adapters/rustCore` (HTTP proxy) without touching routes.
+
+REPO LAYOUT (create)
+nexo/
+  server/                # ts-node core for now (or Rust/Go if available)
+    src/
+      index.ts           # app bootstrap
+      routes/{health,sth,register}.ts
+      ws/relay.ts
+      merkle/{tree.ts, encode.ts}
+      cosign/{policy.ts, keys.ts, sign.ts, verify.ts}
+      ports/{storage.ts, crypto.ts, cosign.ts}
+      adapters/{fileStore.ts, nobleCrypto.ts, cosignEnv.ts}
+      metrics/metrics.ts  # /metrics Prometheus text
+  web/                   # React + TS + Vite + Tailwind + shadcn/ui
+    src/pages/{Chat,Admin,Audit}.tsx
+    src/lib/{api.ts,ws.ts,merkle.ts}
+  scripts/
+    smoke.sh             # strip trailing slash; curl + node smoke
+    smoke.ts             # Node/TS runner using fetch/ws
+    seed_two_dids.ts     # generate 2 Ed25519; POST {id, public_key, timestamp}
+    audit_merkle.ts      # recompute root from users.jsonl and compare STH
+  docs/                  # OPENAPI.yml, RUNBOOK.md, SECURITY.md, grafana.json
+  .github/workflows/{ci.yml,release.yml}
+  package.json, tsconfig.json, .gitignore, .editorconfig, LICENSE, README.md
+
+DELIVERABLES (must exist & pass)
+1) Real Merkle + 2-of-3 Ed25519; not mocked. Threshold verification for every STH.
+2) WS relay stable (heartbeat/backpressure) for ciphertext envelopes.
+3) scripts/smoke.sh & scripts/smoke.ts PASS:
+   A) localhost (Replit run), B) public URL (Replit Deployment)
+   Steps: /health → seed if /sth/latest=404 → /sth/chain → verify chain+signatures → recompute Merkle from users.jsonl → E2EE round trip via WS
+4) Web client: Chat (two tabs), Admin (latest STH/signatures), Audit (chain table + “recompute locally”).
+5) /metrics Prometheus: process_up, users_count, sth_count, ws_sessions_gauge, last_sth_timestamp
+6) CI: Node workflow (no Docker) — lint, build, unit tests, run smoke.ts against running server.
+7) Release: push to GitHub repo “nexo”; create tag v1.0.0; if Replit Deployment present, run public smoke and print URL.
+8) Secrets safe: dev cosigner keys only in server/_secrets/dev_cosigners/ (gitignored).
+
+TEST-FIRST EXECUTION PLAN (reverse order)
+0) Bootstrap minimal README, LICENSE (Apache-2.0), .gitignore; print workspace path.
+1) Write **tests first**:
+   - scripts/smoke.ts implementing all checks; scripts/smoke.sh wrapper; scripts/seed_two_dids.ts
+   - temporary stub server that only returns /health so we can run smoke step 1
+2) Implement crypto+merkle modules (noble libs). Add unit tests for:
+   - merkle root correctness on sample leaves
+   - STH hash canonicalization
+   - 2-of-3 signature verification
+3) Implement fileStore adapter (append JSONL) + compaction; counts for health.
+4) Implement routes:
+   - POST /did/register → validate, append leaf, compute STH (prev_hash, sign with available keys), append sth.jsonl
+   - GET /sth/latest, /sth/chain?limit
+5) Implement WS relay with keep-alive+backpressure.
+6) Make smoke.ts PASS locally → run smoke.sh with URL=http://127.0.0.1:${PORT}
+7) Scaffold web client (Vite+TS+Tailwind+shadcn): Chat/Admin/Audit; wire to API/WS.
+8) Add /metrics; provide docs/grafana.json.
+9) CI (no Docker): node setup, build, unit tests, start server in background, run smoke.ts.
+10) Release: push repo, tag v1.0.0, print Replit Deployment URL & smoke PASS.
+11) Docs: OPENAPI.yml, RUNBOOK.md (deploy, rotate keys), SECURITY.md (threat model), README quickstart (no leading '#').
+
+RUNTIME NOTES
+- Read PORT env from Replit. Start command must bind 0.0.0.0:PORT.
+- Generate dev cosigner keys if env missing; store under server/_secrets/dev_cosigners/.
+- Normalize URL (strip trailing slash) to avoid //sth/chain 301.
+- Idempotent scripts; tolerate reruns.
+
+INPUTS
+- DEPLOY_TARGET=replit (default). API_HOST optional; use Replit Deployment URL if unset.
+
+OUTPUTS
+- Public URL, smoke summary (PASS), repo URL, commit SHA, v1.0.0 tag.
+BEGIN NOW. Work step-by-step and post progress logs after each phase.

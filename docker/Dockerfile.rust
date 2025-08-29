@@ -1,0 +1,53 @@
+# Multi-stage build for NEXO core-rust backend  
+FROM rust:1.75-slim AS builder
+
+WORKDIR /app
+
+# Install build dependencies
+RUN apt-get update && apt-get install -y \
+    pkg-config \
+    libssl-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy Cargo files
+COPY server/core-rust/Cargo.toml server/core-rust/Cargo.lock* ./
+
+# Build dependencies (cache layer)
+RUN mkdir src && echo "fn main() {}" > src/main.rs && \
+    cargo build --release && \
+    rm -rf src
+
+# Copy source code
+COPY server/core-rust/src ./src
+
+# Build application with optimizations
+RUN cargo build --release
+
+# Runtime image
+FROM debian:12-slim AS runtime
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r nexo && useradd -r -g nexo nexo
+
+WORKDIR /app
+
+# Copy binary
+COPY --from=builder /app/target/release/nexo-core ./nexo-core
+
+# Create data directory
+RUN mkdir -p /app/server/_data /app/server/_secrets && \
+    chown -R nexo:nexo /app/server
+
+USER nexo
+
+EXPOSE 8000
+
+ENV RUST_LOG=info
+ENV PORT=8000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost:8000/health || exit 1
+
+CMD ["./nexo-core"]

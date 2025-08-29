@@ -1,0 +1,52 @@
+# Multi-stage build for NEXO edge-ts backend
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY tsconfig.json ./
+COPY vite.config.ts ./
+COPY tailwind.config.ts ./
+COPY postcss.config.js ./
+COPY components.json ./
+
+# Install dependencies
+RUN npm ci --only=production
+
+# Copy source code
+COPY client/ ./client/
+COPY server/ ./server/
+COPY shared/ ./shared/
+
+# Build the application
+RUN npm run build
+
+# Production image
+FROM node:20-alpine AS runtime
+
+RUN addgroup -g 1001 -S nexo && \
+    adduser -S nexo -u 1001
+
+WORKDIR /app
+
+# Copy built application
+COPY --from=builder --chown=nexo:nexo /app/dist ./dist
+COPY --from=builder --chown=nexo:nexo /app/package*.json ./
+COPY --from=builder --chown=nexo:nexo /app/node_modules ./node_modules
+
+# Create data directory
+RUN mkdir -p /app/server/_data /app/server/_secrets && \
+    chown -R nexo:nexo /app/server/_data /app/server/_secrets
+
+USER nexo
+
+EXPOSE 8000
+
+ENV NODE_ENV=production
+ENV PORT=8000
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+  CMD node -e "fetch('http://localhost:8000/health').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"
+
+CMD ["node", "dist/index.js"]

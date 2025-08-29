@@ -1,0 +1,272 @@
+openapi: 3.0.3
+info:
+  title: NEXO API
+  description: Privacy-by-default messenger with auditable transparency
+  version: 1.0.0
+  contact:
+    name: NEXO Team
+    url: https://github.com/nexo/nexo
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0
+
+servers:
+  - url: https://nexo.chat/api
+    description: Production server
+  - url: http://localhost:5000
+    description: Development server
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      description: Returns system health status and basic metrics
+      responses:
+        '200':
+          description: System is healthy
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+        '500':
+          description: System is unhealthy
+
+  /did/register:
+    post:
+      summary: Register DID
+      description: Register a new DID with public key and append to transparency log
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DIDRegistration'
+      responses:
+        '201':
+          description: DID registered successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  tree_size:
+                    type: integer
+        '400':
+          description: Invalid registration data
+        '429':
+          description: Rate limit exceeded
+
+  /sth/latest:
+    get:
+      summary: Get latest STH
+      description: Returns the most recent Signed Tree Head
+      responses:
+        '200':
+          description: Latest STH
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/STH'
+        '404':
+          description: No STH found
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  detail:
+                    type: string
+                    example: "No STH found"
+
+  /sth/chain:
+    get:
+      summary: Get STH chain
+      description: Returns a list of STH entries in newest-first order
+      parameters:
+        - name: limit
+          in: query
+          description: Maximum number of entries to return
+          schema:
+            type: integer
+            default: 10
+            minimum: 1
+            maximum: 1000
+      responses:
+        '200':
+          description: STH chain
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/STH'
+
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      description: Returns metrics in Prometheus text format
+      responses:
+        '200':
+          description: Metrics data
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: |
+                  # HELP process_up Whether the process is running
+                  # TYPE process_up gauge
+                  process_up 1
+
+  /ws/{session_id}:
+    get:
+      summary: WebSocket connection
+      description: Establish WebSocket connection for E2EE message relay
+      parameters:
+        - name: session_id
+          in: path
+          required: true
+          description: Unique session identifier
+          schema:
+            type: string
+      responses:
+        '101':
+          description: WebSocket connection established
+        '400':
+          description: Invalid session ID
+
+components:
+  schemas:
+    Health:
+      type: object
+      required:
+        - status
+        - timestamp
+        - users_count
+        - sth_count
+      properties:
+        status:
+          type: string
+          enum: [healthy]
+        timestamp:
+          type: integer
+          description: Unix timestamp
+        users_count:
+          type: integer
+          minimum: 0
+        sth_count:
+          type: integer
+          minimum: 0
+
+    DIDRegistration:
+      type: object
+      required:
+        - id
+        - public_key
+        - timestamp
+      properties:
+        id:
+          type: string
+          description: DID identifier
+          example: "did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK"
+        public_key:
+          type: string
+          format: base64
+          description: Ed25519 public key (32 bytes, base64 encoded)
+          example: "3b6a27bcceb6a42d62a3a8d02a6f0d73653215771de243a63ac048a18b59da29"
+        timestamp:
+          type: integer
+          description: Unix timestamp
+          example: 1735689247
+
+    STH:
+      type: object
+      required:
+        - tree_size
+        - root
+        - prev_hash
+        - policy
+        - timestamp
+        - signatures
+      properties:
+        tree_size:
+          type: integer
+          minimum: 0
+          description: Number of leaves in the Merkle tree
+        root:
+          type: string
+          format: base64
+          description: Merkle tree root hash
+        prev_hash:
+          type: string
+          format: base64
+          description: Hash of previous STH (without signatures)
+        policy:
+          $ref: '#/components/schemas/Policy'
+        timestamp:
+          type: integer
+          description: Unix timestamp when STH was created
+        signatures:
+          type: array
+          items:
+            $ref: '#/components/schemas/Signature'
+          description: Ed25519 signatures from cosigners
+
+    Policy:
+      type: object
+      required:
+        - t
+        - n
+      properties:
+        t:
+          type: integer
+          description: Signature threshold (minimum required)
+          example: 2
+        n:
+          type: integer
+          description: Total number of cosigners
+          example: 3
+
+    Signature:
+      type: object
+      required:
+        - cosigner
+        - sig
+      properties:
+        cosigner:
+          type: string
+          description: Cosigner identifier
+          example: "cosigner_0"
+        sig:
+          type: string
+          format: base64
+          description: Ed25519 signature bytes
+
+    WSMessage:
+      type: object
+      required:
+        - from
+        - to
+        - payload
+      properties:
+        from:
+          type: string
+          description: Source session ID
+        to:
+          type: string
+          description: Target session ID
+        payload:
+          type: string
+          format: base64
+          description: Opaque encrypted message payload
+
+  securitySchemes:
+    RateLimit:
+      type: apiKey
+      in: header
+      name: X-RateLimit-Limit
+      description: Rate limiting applied to registration endpoint
+
+security:
+  - RateLimit: []

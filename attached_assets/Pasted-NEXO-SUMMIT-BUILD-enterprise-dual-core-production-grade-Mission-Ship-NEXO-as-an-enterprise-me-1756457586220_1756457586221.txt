@@ -1,0 +1,93 @@
+NEXO — SUMMIT BUILD (enterprise, dual-core, production-grade)
+
+Mission
+Ship NEXO as an enterprise messenger with privacy-by-default, verifiable transparency, and a migration path to native performance. Deliver a working product on Replit today (TypeScript/Node), AND generate a parallel Rust/Axum core compiled by GitHub Actions with Docker images for production deploy. Keep API contracts identical.
+
+Contracts (unchanged)
+GET /health  → {status,timestamp,users_count,sth_count}
+POST /did/register  {id, public_key(base64 raw 32B), timestamp}
+GET /sth/latest
+GET /sth/chain?limit=N
+WS /ws/{session_id}  opaque envelopes {from,to,payload}; heartbeat + backpressure
+
+Cryptography (real)
+- Leaf = sha256( id(utf8) || public_key(raw bytes) || timestamp(8-byte BE) )
+- Binary Merkle (carry last), root SHA-256
+- STH = {tree_size,root(base64),prev_hash(base64),policy:{t:2,n:3},timestamp,signatures:[{cosigner,sig(b64)}]}
+- STH hash = sha256(canonical_json(STH without signatures))
+- 2-of-3 Ed25519; keys from env COSIGNER_{0,1,2}_SK(b64); dev autogen to server/_secrets/dev_cosigners/ (gitignored)
+
+Architecture (Hexagonal)
+ports/: Storage, Crypto, Cosign, Transport
+adapters/: fileStore(jsonl), nobleCrypto(@noble/ed25519,@noble/hashes), cosignEnv, wsTransport
+metrics/: /metrics Prometheus
+Keep code framework-agnostic so Rust core can replace Node without API changes.
+
+Deliver TWO backends
+A) edge-ts  (Replit runtime)
+  - Fastify + @fastify/websocket
+  - Implements all routes + WS relay using ports/adapters above
+  - Observability: /metrics + basic OpenTelemetry stubs (noop)
+  - Rate limiting, max payload size, CORS allowlist via env
+
+B) core-rust  (compiled in CI, not on Replit)
+  - axum + tokio + ed25519-dalek + sha2
+  - Same storage layout (jsonl) behind storage trait
+  - Same routes + WS (tokio-tungstenite)
+  - Unit tests for merkle and cosign threshold
+  - Dockerfile (multi-stage, non-root)
+  - Expose 8000
+
+Gateway choice
+- At runtime choose BACKEND=edge-ts (default) or BACKEND=core-rust via env.
+- Provide reverse-proxy edge when BACKEND=core-rust is deployed (simple Node proxy or nginx sample in docker/compose.yml).
+
+Transports (now & future)
+- Implement wsTransport now.
+- Create quicTransport.ts and rust stubs (WebTransport/QUIC) with clear interfaces; not used on Replit.
+
+E2EE roadmap
+- Keep current E2EE (libs: Web Crypto / noble) behind interface crypto/ratchet/.
+- Provide Double-Ratchet interfaces + docs; for Rust core, add a module skeleton using signal-client (build in CI only). Do not pull heavy JS signal libs on Replit.
+
+Repo (enforce)
+server/edge-ts/src/{index.ts,routes/health.ts,routes/register.ts,routes/sth.ts,ws/relay.ts,ports/*,adapters/*,metrics/metrics.ts,crypto/ratchet/*}
+server/core-rust/{Cargo.toml,src/main.rs,src/routes.rs,src/merkle.rs,src/cosign.rs,src/storage.rs,src/ws.rs,src/metrics.rs,tests/*}
+web/src/pages/{Chat.tsx,Admin.tsx,Audit.tsx}; web/src/lib/{api.ts,ws.ts,merkle.ts,transport.ts}
+mobile/ (React Native skeleton only, code sharing via web/src/lib)
+desktop/ (Tauri skeleton only, README)
+scripts/{smoke.sh,smoke.ts,seed_two_dids.ts,audit_merkle.ts}
+docs/{OPENAPI.yml,RUNBOOK.md,SECURITY.md,grafana.json,CRYPTO-RATCHET-NOTES.md}
+docker/{Dockerfile.edge, Dockerfile.rust, compose.yml}
+.github/workflows/{ci-edge.yml,ci-rust.yml,release.yml}
+.editorconfig, .gitignore, LICENSE Apache-2.0, README.md
+
+CI/CD
+- ci-edge.yml: Node 20, pnpm or npm ci, build, unit tests, start server in bg, run scripts/smoke.ts (budget mode) against http://127.0.0.1:${PORT}
+- ci-rust.yml: rustup stable, cargo build --release, cargo test -q, build Docker image docker/Dockerfile.rust, push to GHCR on PR merge
+- release.yml (on tag v1.*):
+  build & push GHCR images for both backends;
+  if DEPLOY_TARGET=replit → deploy edge-ts and run public smoke.sh
+  if DEPLOY_TARGET=vps → docker compose up -d core-rust reverse-proxy; run public smoke.sh; rollback on failure
+- Upload artifacts: binaries, smoke logs, image digests
+
+Budget & Stability
+- scripts/limits.env with MAX_WS_PAYLOAD_BYTES=131072, RATE_LIMIT_RPS=10, SMOKE_TIMEOUT_SEC=180
+- WS backpressure, message size clamp, heartbeat
+- Idempotent seeding in smoke.ts; trailing-slash normalization
+
+Docs
+- RUNBOOK.md: Replit deploy, Cloudflare Named Tunnel, VPS Docker compose, key rotation, rollback
+- SECURITY.md: threat model, key transparency, rate-limit, payload caps, secret hygiene
+- grafana.json minimal dashboard; /metrics includes process_up, users_count, sth_count, ws_sessions, last_sth_timestamp
+
+Acceptance gates (must be met before “build completed”)
+1) edge-ts runs on Replit; /health, /did/register, /sth/latest, /sth/chain and WS work
+2) Real Merkle + 2-of-3 Ed25519 verified by scripts/smoke.ts
+3) Web client Chat/Admin/Audit wired to API/WS and shows verification states
+4) /metrics works; grafana.json present
+5) ci-edge green; ci-rust builds & tests in GitHub; both Dockerfiles exist
+6) release.yml publishes images; if DEPLOY_TARGET provided, public smoke PASS
+7) Print public URL, repo URL, commit SHA, image tags, and next steps to switch BACKEND=core-rust
+
+Begin upgrading plan now; then proceed to build.

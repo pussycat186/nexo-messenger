@@ -1,7 +1,9 @@
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
-use ed25519::{Signature, Signer, Verifier};
-use ed25519_dalek::{SigningKey, VerifyingKey};
+use ed25519_dalek::{SigningKey, VerifyingKey, Signer, Verifier};
+use ed25519 as ed25519_types;
+use ed25519_types::Signature;
 use rand::rngs::OsRng;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -20,8 +22,10 @@ pub struct Cosigner {
 pub fn load_cosigners() -> Vec<Cosigner> {
     (0..3)
         .map(|i| {
-            let signing = SigningKey::generate(&mut OsRng);
-            let verifying = signing.verifying_key();
+            let mut sk_bytes = [0u8; 32];
+            OsRng.fill_bytes(&mut sk_bytes);
+            let signing = SigningKey::from_bytes(&sk_bytes);
+            let verifying: VerifyingKey = (&signing).into();
             Cosigner {
                 id: format!("cosigner_{}", i),
                 signing,
@@ -35,7 +39,7 @@ pub fn load_cosigners() -> Vec<Cosigner> {
 pub fn sign_sth(sth_bytes: &[u8], cosigners: &[Cosigner], threshold: usize) -> Vec<SignatureData> {
     let mut out = Vec::new();
     for c in cosigners {
-        let sig: Signature = c.signing.sign(sth_bytes);
+        let sig: Signature = Signer::sign(&c.signing, sth_bytes);
         out.push(SignatureData {
             cosigner: c.id.clone(),
             sig: BASE64.encode(sig.to_bytes()),
@@ -57,17 +61,15 @@ pub fn verify_threshold(
     for s in signatures {
         if let Some(c) = cosigners.iter().find(|c| c.id == s.cosigner) {
             if let Ok(sig_bytes) = BASE64.decode(&s.sig) {
-                if let Ok(sig) = Signature::from_bytes(
-                    sig_bytes
-                        .as_slice()
-                        .try_into()
-                        .unwrap_or_else(|_| [0u8; 64]),
-                ) {
-                    if c.verifying.verify(message, &sig).is_ok() {
-                        ok += 1;
-                        if ok >= threshold {
-                            return true;
-                        }
+                let sig_arr: [u8; 64] = sig_bytes
+                    .as_slice()
+                    .try_into()
+                    .unwrap_or([0u8; 64]);
+                let sig: Signature = Signature::from_bytes(&sig_arr);
+                if Verifier::verify(&c.verifying, message, &sig).is_ok() {
+                    ok += 1;
+                    if ok >= threshold {
+                        return true;
                     }
                 }
             }

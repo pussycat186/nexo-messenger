@@ -1,15 +1,11 @@
 use axum::{
-    extract::ws::{WebSocket, WebSocketUpgrade},
-    extract::{Path, Query, State},
-    http::{header, StatusCode},
-    response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
+    Router,
 };
 use std::{collections::HashMap, net::SocketAddr, sync::Arc};
 use tokio::sync::RwLock;
 use tower_http::cors::CorsLayer;
-use tracing::{info, warn};
+use tracing::info;
 use tracing_subscriber;
 
 mod cosign;

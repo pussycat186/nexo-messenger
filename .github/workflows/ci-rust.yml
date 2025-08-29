@@ -74,7 +74,7 @@ jobs:
             echo "Default run not responding; auto-detecting bin via cargo metadata…"
             sudo apt-get update -y && sudo apt-get install -y jq >/dev/null
             BIN=$(cargo metadata --format-version=1 | jq -r '
-              .packages[] | select(.manifest_path|test("server/core-rust/Cargo.toml$"))
+              .packages[] | select(.manifest_path|test("Cargo.toml$"))
               | .targets[] | select(.kind[]=="bin") | .name' | head -n1)
             echo "Detected bin: ${BIN:-<none>}"
             if [ -n "$BIN" ]; then

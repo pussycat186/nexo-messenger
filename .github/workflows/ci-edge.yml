@@ -12,6 +12,9 @@ concurrency:
 jobs:
   test-edge:
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: .
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -31,20 +34,33 @@ jobs:
       - name: Show build output (sanity)
         run: |
           echo "::group::build-artifacts"
-          (ls -la) || true
-          (find . -maxdepth 2 -type d -name dist -print -exec find {} -maxdepth 1 -type f \; | head -n 200) || true
-          (find . -maxdepth 2 -type d -name build -print -exec find {} -maxdepth 1 -type f \; | head -n 200) || true
+          (find . -maxdepth 3 -type d -name dist  -print -exec find {} -maxdepth 1 -type f \; | head -n 200) || true
+          (find . -maxdepth 3 -type d -name build -print -exec find {} -maxdepth 1 -type f \; | head -n 200) || true
           echo "::endgroup::"
 
-      # Inline preview server that serves ./dist (fallback to ./build) and /health
       - name: Start preview server (inline, port 5000)
         run: |
           node - <<'NODE' &
           const http = require('http'), fs = require('fs'), path = require('path'), url = require('url');
           const port = 5000;
-          const candidates = [path.join(process.cwd(),'dist'), path.join(process.cwd(),'build')];
-          let root = candidates.find(p => { try { return fs.statSync(p).isDirectory(); } catch { return false; } });
-          if (!root) root = process.cwd(); // last resort to let the job show a 404 quickly
+          // Candidate build roots to search for index.html:
+          const candidates = [
+            path.join(process.cwd(), 'dist'),
+            path.join(process.cwd(), 'build'),
+            path.join(process.cwd(), 'edge', 'dist'),
+            path.join(process.cwd(), 'web', 'dist'),
+            path.join(process.cwd(), 'frontend', 'dist')
+          ];
+          function pickRoot() {
+            for (const p of candidates) {
+              try {
+                if (fs.existsSync(path.join(p, 'index.html'))) return p;
+              } catch {}
+            }
+            // fallback: root dir (will 404 quickly, but logs help)
+            return process.cwd();
+          }
+          const root = pickRoot();
           console.log('[inline-preview] root =', root, 'port =', port);
           const server = http.createServer((req,res)=>{
             if (req.url === '/health') { res.writeHead(200,{'Content-Type':'application/json'}); return res.end('{"status":"ok"}'); }
@@ -86,6 +102,7 @@ jobs:
           name: edge-smoke-logs
           path: |
             **/npm-debug.log
+            **/logs/**
             dist/**
             build/**
           if-no-files-found: ignore
